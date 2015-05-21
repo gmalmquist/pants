@@ -46,11 +46,11 @@ class JaxbGen(SimpleCodegenTask, NailgunTask):
     return isinstance(target, JaxbLibrary)
 
   def execute_codegen(self, targets):
-    output_dir = self.workdir
-    safe_mkdir(output_dir)
     cache = []
 
     for target in targets:
+      output_dir = self.codegen_workdir(target)
+      safe_mkdir(output_dir)
       if not isinstance(target, JaxbLibrary):
         raise TaskError('Invalid target type "{class_type}" (expected JaxbLibrary)'
                         .format(class_type=type(target).__name__))

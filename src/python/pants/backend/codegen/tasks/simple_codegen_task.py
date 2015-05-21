@@ -20,6 +20,14 @@ class SimpleCodegenTask(Task):
   """
 
   @classmethod
+  def register_options(cls, register):
+    super(SimpleCodegenTask, cls).register_options(register)
+    register('--strategy', choices=['global', 'isolated'], default='isolated',
+             help='Selects the compilation strategy to use. The "global" strategy uses a shared '
+                  'global directory for all generated code, and the "isolated" strategy uses '
+                  'per-target codegen directories.')
+
+  @classmethod
   def get_fingerprint_strategy(cls):
     return None
 
@@ -34,7 +42,7 @@ class SimpleCodegenTask(Task):
 
     :return: a type (class) that inherits from Target.
     """
-    raise SimpleCodegenTask.UnimplementedError('synthetic_target_type')
+    raise NotImplementedError
 
   def is_gentarget(self, target):
     """Predicate which determines whether the target in question is relevant to this codegen task.
@@ -43,14 +51,14 @@ class SimpleCodegenTask(Task):
     :param target: The target to check.
     :return: True if this class can generate code for the given target, False otherwise.
     """
-    raise SimpleCodegenTask.UnimplementedError('is_gentarget')
+    raise NotImplementedError
 
   def execute_codegen(self, invalid_targets):
     """Generated code for the given list of targets.
 
     :param invalid_targets: an iterable of targets (a subset of codegen_targets()).
     """
-    raise SimpleCodegenTask.UnimplementedError('execute_codegen')
+    raise NotImplementedError
 
   def sources_generated_by_target(self, target):
     """Predicts what source files will be generated from the given codegen target.
@@ -58,17 +66,26 @@ class SimpleCodegenTask(Task):
     :param target: the codegen target in question (eg a .proto library).
     :return: an iterable of strings containing the file system paths to the sources files.
     """
-    raise SimpleCodegenTask.UnimplementedError('sources_generated_by_target')
+    raise NotImplementedError
 
   def codegen_targets(self):
     """Finds codegen targets in the depencency graph.
 
     :return: an iterable of dependency targets.
     """
-    # NOTE(gm): The original CodeGen base just searches through all the targets in the graph and
-    # runs the is_gentarget check to see if it wants it. I guess we want to do the same thing here,
-    # probably. I don't see any reason not to?
     return self.context.targets(self.is_gentarget)
+
+  def codegen_workdir(self, target):
+    """The path to the directory code should be generated in. E.g., this might be something like
+    /home/user/repo/.pants.d/gen/jaxb/...
+
+    :return: The absolute file path.
+    """
+    suffixes = {
+      'global': 'global',
+      'isolated': os.path.join('isolated', target.id)
+    }
+    return os.path.join(self.workdir, suffixes[self.get_options().strategy])
 
   def execute(self):
     targets = self.codegen_targets()
@@ -83,27 +100,29 @@ class SimpleCodegenTask(Task):
       vts_artifactfiles_pairs = []
 
       for target in targets:
+        target_workdir = self.codegen_workdir(target)
         synthetic_name = target.id
-        sources_rel_path = os.path.relpath(self.workdir, get_buildroot())
+        sources_rel_path = os.path.relpath(target_workdir, get_buildroot())
         spec_path = '{0}{1}'.format(type(self).__name__, sources_rel_path)
         synthetic_address = SyntheticAddress(spec_path, synthetic_name)
         raw_generated_sources = self.sources_generated_by_target(target)
         # Make the sources robust regardless of whether subclasses return relative paths, or
         # absolute paths that are subclasses of the workdir.
-        generated_sources = [src if src.startswith(self.workdir)
-                             else os.path.join(self.workdir, src)
+        generated_sources = [src if src.startswith(target_workdir)
+                             else os.path.join(target_workdir, src)
                              for src in raw_generated_sources]
-        relative_generated_sources = [os.path.relpath(src, self.workdir)
+        relative_generated_sources = [os.path.relpath(src, target_workdir)
                                       for src in generated_sources]
 
-        synthetic_target = self.context.add_new_target(
+        self.target = self.context.add_new_target(
           address=synthetic_address,
-          target_type=self.synthetic_target_type, # From subclasses.
+          target_type=self.synthetic_target_type,  # From subclasses.
           dependencies=self.synthetic_target_extra_dependencies,
           sources_rel_path=sources_rel_path,
           sources=relative_generated_sources,
           derived_from=target,
         )
+        synthetic_target = self.target
 
         build_graph = self.context.build_graph
 
@@ -134,9 +153,3 @@ class SimpleCodegenTask(Task):
 
       if self.artifact_cache_writes_enabled():
         self.update_artifact_cache(vts_artifactfiles_pairs)
-
-
-  class UnimplementedError(Exception):
-    """Raised if subclasses fail to implement vital methods when they are called."""
-    def __init__(self, method):
-      super(Exception, self).__init__('{} hasn\'t been implemented by subclass!'.format(method))
