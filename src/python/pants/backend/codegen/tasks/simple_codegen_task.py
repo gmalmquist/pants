@@ -19,6 +19,8 @@ class SimpleCodegenTask(Task):
   sources_generated_by_target.
   """
 
+  _STRATEGY = None
+
   @classmethod
   def register_options(cls, register):
     super(SimpleCodegenTask, cls).register_options(register)
@@ -85,9 +87,13 @@ class SimpleCodegenTask(Task):
       'global': 'global',
       'isolated': os.path.join('isolated', target.id)
     }
-    return os.path.join(self.workdir, suffixes[self.get_options().strategy])
+    return os.path.join(self.workdir, suffixes[SimpleCodegenTask._STRATEGY])
 
   def execute(self):
+    if self.__class__.__name__.startswith('SimpleCodegenTask'):
+      SimpleCodegenTask._STRATEGY = self.get_options().strategy
+      return # Do not actually attempt to run the base class.
+
     targets = self.codegen_targets()
     with self.invalidated(targets,
                           invalidate_dependents=True,
