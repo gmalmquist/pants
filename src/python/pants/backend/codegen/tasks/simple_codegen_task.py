@@ -19,6 +19,16 @@ class SimpleCodegenTask(Task):
   sources_generated_by_target.
   """
 
+  # NOTE(gm): This is to make --gen-strategy=global/isolated scoped to 'gen', rather than to the
+  # individual codegen subclasses. This design choice was made on the assumption that users are
+  # most likely wanting to control the strategy of all kinds of codegen at once, rather than
+  # fine-tuning the behavior of the individual 'flavors' of codegen. If this is an incorrect
+  # assumption, I can easily change it to work the other way (it'd actually be much more
+  # straightforward to code the other way).
+  #
+  # The code at the beginning of execute(self), and the code added to the codegen register,
+  # was added to accomplish this global effect. (Which I note so we remember to delete it if we
+  # change our minds on this behavior).
   _STRATEGY = None
 
   @classmethod
