@@ -27,6 +27,15 @@ class SimpleCodegenTask(Task):
   def synthetic_target_extra_dependencies(self):
     return []
 
+  @property
+  def synthetic_target_type(self):
+    """The type of target this codegen task generates. For example, the target type for JaxbGen
+    would simply be JavaLibrary.
+
+    :return: a type (class) that inherits from Target.
+    """
+    raise SimpleCodegenTask.UnimplementedError('synthetic_target_type')
+
   def is_gentarget(self, target):
     """Predicate which determines whether the target in question is relevant to this codegen task.
     E.g., the JaxbGen task considers JaxbLibrary targets to be relevant, and nothing else.
@@ -47,7 +56,7 @@ class SimpleCodegenTask(Task):
     """Predicts what source files will be generated from the given codegen target.
 
     :param target: the codegen target in question (eg a .proto library).
-    :return: an iterable of strings containing the absolute file system paths to source files.
+    :return: an iterable of strings containing the file system paths to the sources files.
     """
     raise SimpleCodegenTask.UnimplementedError('sources_generated_by_target')
 
@@ -78,7 +87,12 @@ class SimpleCodegenTask(Task):
         sources_rel_path = os.path.relpath(self.workdir, get_buildroot())
         spec_path = '{0}{1}'.format(type(self).__name__, sources_rel_path)
         synthetic_address = SyntheticAddress(spec_path, synthetic_name)
-        generated_sources = self.sources_generated_by_target(target)
+        raw_generated_sources = self.sources_generated_by_target(target)
+        # Make the sources robust regardless of whether subclasses return relative paths, or
+        # absolute paths that are subclasses of the workdir.
+        generated_sources = [src if src.startswith(self.workdir)
+                             else os.path.join(self.workdir, src)
+                             for src in raw_generated_sources]
         relative_generated_sources = [os.path.relpath(src, self.workdir)
                                       for src in generated_sources]
 

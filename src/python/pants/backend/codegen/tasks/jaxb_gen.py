@@ -40,11 +40,15 @@ class JaxbGen(SimpleCodegenTask, NailgunTask):
     java_main = 'com.sun.tools.internal.xjc.Driver'
     return self.runjava(classpath=classpath, main=java_main, args=args, workunit_name='xjc')
 
+  @property
+  def synthetic_target_type(self):
+    return JavaLibrary
+
   def is_gentarget(self, target):
     return isinstance(target, JaxbLibrary)
 
   def execute_codegen(self, targets):
-    output_dir = os.path.join(self.workdir, 'gen-java')
+    output_dir = self.workdir
     safe_mkdir(output_dir)
     cache = []
 
@@ -79,34 +83,6 @@ class JaxbGen(SimpleCodegenTask, NailgunTask):
     for source in target.sources_relative_to_buildroot():
       to_generate.extend(self._sources_to_be_generated(target.package, source))
     return to_generate
-
-  def createtarget(self, lang, gentarget, dependees):
-    predicates = self.genlangs()
-    languages = predicates.keys()
-    if not (lang in languages) or not (predicates[lang](gentarget)):
-      raise TaskError('Invalid language "{lang}" for task {task}'
-                      .format(lang=lang, task=type(self).__name__))
-
-    to_generate = []
-    for source in gentarget.sources_relative_to_buildroot():
-      to_generate.extend(self._sources_to_be_generated(gentarget.package, source))
-
-    spec_path = os.path.join(os.path.relpath(self.workdir, get_buildroot()), 'gen-java')
-    address = SyntheticAddress(spec_path=spec_path, target_name=gentarget.id)
-    target = self.context.add_new_target(
-        address,
-        JavaLibrary,
-        derived_from=gentarget,
-        sources=to_generate,
-        provides=gentarget.provides,
-        dependencies=[],
-        excludes=gentarget.payload.excludes
-    )
-
-    for dependee in dependees:
-      dependee.inject_dependency(target.address)
-
-    return target
 
   @classmethod
   def _guess_package(self, path):
