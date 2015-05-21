@@ -14,9 +14,9 @@ from twitter.common.collections import OrderedSet, maybe_list
 
 from pants.backend.codegen.targets.java_protobuf_library import JavaProtobufLibrary
 from pants.backend.codegen.targets.java_wire_library import JavaWireLibrary
-from pants.backend.codegen.tasks.code_gen import CodeGen
 from pants.backend.codegen.tasks.protobuf_gen import check_duplicate_conflicting_protos
 from pants.backend.codegen.tasks.protobuf_parse import ProtobufParse
+from pants.backend.codegen.tasks.simple_codegen_task import SimpleCodegenTask
 from pants.backend.jvm.targets.java_library import JavaLibrary
 from pants.backend.jvm.tasks.jvm_tool_task_mixin import JvmToolTaskMixin
 from pants.base.address import SyntheticAddress
@@ -31,7 +31,7 @@ from pants.option.options import Options
 logger = logging.getLogger(__name__)
 
 
-class WireGen(CodeGen, JvmToolTaskMixin):
+class WireGen(SimpleCodegenTask, JvmToolTaskMixin):
   @classmethod
   def register_options(cls, register):
     super(WireGen, cls).register_options(register)
@@ -42,7 +42,23 @@ class WireGen(CodeGen, JvmToolTaskMixin):
   def __init__(self, *args, **kwargs):
     """Generates Java files from .proto files using the Wire protobuf compiler."""
     super(WireGen, self).__init__(*args, **kwargs)
-    self.java_out = os.path.join(self.workdir, 'gen-java')
+
+  @property
+  def synthetic_target_type(self):
+    return JavaLibrary
+
+  def is_gentarget(self, target):
+    return isinstance(target, JavaWireLibrary)
+
+  def sources_generated_by_target(self, target):
+    genfiles = []
+    for source in target.sources_relative_to_source_root():
+      path = os.path.join(target.target_base, source)
+      genfiles.extend(self.calculate_genfiles(
+        path,
+        source,
+        target.payload.service_writer).get('java', []))
+    return genfiles
 
   def resolve_deps(self, unresolved_deps):
     deps = OrderedSet()
@@ -54,11 +70,12 @@ class WireGen(CodeGen, JvmToolTaskMixin):
     return deps
 
   @property
+  def synthetic_target_extra_dependencies(self):
+    return self.javadeps
+
+  @property
   def javadeps(self):
     return self.resolve_deps(self.get_options().javadeps)
-
-  def is_gentarget(self, target):
-    return isinstance(target, JavaWireLibrary)
 
   def is_proto_target(self, target):
     return isinstance(target, JavaProtobufLibrary)
@@ -66,7 +83,7 @@ class WireGen(CodeGen, JvmToolTaskMixin):
   def genlangs(self):
     return {'java': lambda t: t.is_jvm}
 
-  def genlang(self, lang, targets):
+  def execute_codegen(self, targets):
     # Invoke the generator once per target.  Because the wire compiler has flags that try to reduce
     # the amount of code emitted, Invoking them all together will break if one target specifies a
     # service_writer and another does not, or if one specifies roots and another does not.
@@ -82,10 +99,7 @@ class WireGen(CodeGen, JvmToolTaskMixin):
         relative_sources.add(relative_source)
       check_duplicate_conflicting_protos(self, sources_by_base, relative_sources, self.context.log)
 
-      if lang != 'java':
-        raise TaskError('Unrecognized wire gen lang: {0}'.format(lang))
-
-      args = ['--java_out={0}'.format(self.java_out)]
+      args = ['--java_out={0}'.format(self.codegen_workdir(target))]
 
       # Add all params in payload to args
 

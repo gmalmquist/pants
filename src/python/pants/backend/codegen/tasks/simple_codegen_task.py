@@ -15,7 +15,7 @@ from pants.base.build_environment import get_buildroot
 class SimpleCodegenTask(Task):
   """Simpler base-class for single-language code-gen.
 
-  Subclasses should implement at minimum: is_gentarget, execute_codegen, and
+  Subclasses should implement at minimum: synthetic_target_type, is_gentarget, execute_codegen, and
   sources_generated_by_target.
   """
 
@@ -90,7 +90,7 @@ class SimpleCodegenTask(Task):
     return os.path.join(self.workdir, suffixes[SimpleCodegenTask._STRATEGY])
 
   def execute(self):
-    if self.__class__.__name__.startswith('SimpleCodegenTask'):
+    if type(self).__name__.startswith('SimpleCodegenTask'):
       SimpleCodegenTask._STRATEGY = self.get_options().strategy
       return # Do not actually attempt to run the base class.
 
