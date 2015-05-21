@@ -10,16 +10,14 @@ import logging
 import os
 from collections import OrderedDict, defaultdict
 
-from twitter.common.collections import OrderedSet, maybe_list
+from twitter.common.collections import OrderedSet
 
-from pants.backend.codegen.targets.java_protobuf_library import JavaProtobufLibrary
 from pants.backend.codegen.targets.java_wire_library import JavaWireLibrary
 from pants.backend.codegen.tasks.protobuf_gen import check_duplicate_conflicting_protos
 from pants.backend.codegen.tasks.protobuf_parse import ProtobufParse
 from pants.backend.codegen.tasks.simple_codegen_task import SimpleCodegenTask
 from pants.backend.jvm.targets.java_library import JavaLibrary
 from pants.backend.jvm.tasks.jvm_tool_task_mixin import JvmToolTaskMixin
-from pants.base.address import SyntheticAddress
 from pants.base.address_lookup_error import AddressLookupError
 from pants.base.build_environment import get_buildroot
 from pants.base.exceptions import TaskError
@@ -71,17 +69,7 @@ class WireGen(SimpleCodegenTask, JvmToolTaskMixin):
 
   @property
   def synthetic_target_extra_dependencies(self):
-    return self.javadeps
-
-  @property
-  def javadeps(self):
     return self.resolve_deps(self.get_options().javadeps)
-
-  def is_proto_target(self, target):
-    return isinstance(target, JavaProtobufLibrary)
-
-  def genlangs(self):
-    return {'java': lambda t: t.is_jvm}
 
   def execute_codegen(self, targets):
     # Invoke the generator once per target.  Because the wire compiler has flags that try to reduce
@@ -147,36 +135,6 @@ class WireGen(SimpleCodegenTask, JvmToolTaskMixin):
         sources_by_base[base] = OrderedSet()
       sources_by_base[base].update(sources)
     return sources_by_base
-
-  def createtarget(self, lang, gentarget, dependees):
-    if lang == 'java':
-      return self._create_java_target(gentarget, dependees)
-    else:
-      raise TaskError('Unrecognized wire gen lang: {0}'.format(lang))
-
-  def _create_java_target(self, target, dependees):
-    genfiles = []
-    for source in target.sources_relative_to_source_root():
-      path = os.path.join(target.target_base, source)
-      genfiles.extend(self.calculate_genfiles(
-        path,
-        source,
-        target.payload.service_writer).get('java', []))
-
-    spec_path = os.path.relpath(self.java_out, get_buildroot())
-    address = SyntheticAddress(spec_path, target.id)
-    deps = OrderedSet(self.javadeps)
-    tgt = self.context.add_new_target(address,
-                                      JavaLibrary,
-                                      derived_from=target,
-                                      sources=genfiles,
-                                      provides=target.provides,
-                                      dependencies=deps,
-                                      excludes=target.payload.excludes)
-    for dependee in dependees:
-      dependee.inject_dependency(tgt.address)
-    return tgt
-
 
   def calculate_genfiles(self, path, source, service_writer):
     protobuf_parse = ProtobufParse(path, source)
