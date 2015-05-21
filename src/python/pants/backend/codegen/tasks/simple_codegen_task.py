@@ -24,7 +24,7 @@ class SimpleCodegenTask(Task):
   @classmethod
   def register_options(cls, register):
     super(SimpleCodegenTask, cls).register_options(register)
-    register('--strategy', choices=['global', 'isolated'], default='isolated',
+    register('--strategy', choices=['global', 'isolated'], default='global',
              help='Selects the compilation strategy to use. The "global" strategy uses a shared '
                   'global directory for all generated code, and the "isolated" strategy uses '
                   'per-target codegen directories.')
