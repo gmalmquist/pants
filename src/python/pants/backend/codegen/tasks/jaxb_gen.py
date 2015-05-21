@@ -11,7 +11,7 @@ import re
 from xml.dom.minidom import parse
 
 from pants.backend.codegen.targets.jaxb_library import JaxbLibrary
-from pants.backend.codegen.tasks.code_gen import CodeGen
+from pants.backend.codegen.tasks.simple_codegen_task import SimpleCodegenTask
 from pants.backend.jvm.targets.java_library import JavaLibrary
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
 from pants.base.address import SyntheticAddress
@@ -21,7 +21,7 @@ from pants.java.distribution.distribution import Distribution
 from pants.util.dirutil import safe_mkdir
 
 
-class JaxbGen(CodeGen, NailgunTask):
+class JaxbGen(SimpleCodegenTask, NailgunTask):
   """Generates java source files from jaxb schema (.xsd)."""
 
   def __init__(self, *args, **kwargs):
@@ -40,18 +40,10 @@ class JaxbGen(CodeGen, NailgunTask):
     java_main = 'com.sun.tools.internal.xjc.Driver'
     return self.runjava(classpath=classpath, main=java_main, args=args, workunit_name='xjc')
 
-  def is_forced(self, lang):
-    return lang in self.gen_langs
-
   def is_gentarget(self, target):
     return isinstance(target, JaxbLibrary)
 
-  def prepare_gen(self, target):
-    pass
-
-  def genlang(self, lang, targets):
-    if lang != 'java':
-      raise TaskError('Unrecognized jaxb language: {}'.format(lang))
+  def execute_codegen(self, targets):
     output_dir = os.path.join(self.workdir, 'gen-java')
     safe_mkdir(output_dir)
     cache = []
@@ -82,8 +74,11 @@ class JaxbGen(CodeGen, NailgunTask):
 
     return cache
 
-  def genlangs(self):
-    return {'java': lambda t: t.is_jvm}
+  def sources_generated_by_target(self, target):
+    to_generate = []
+    for source in target.sources_relative_to_buildroot():
+      to_generate.extend(self._sources_to_be_generated(target.package, source))
+    return to_generate
 
   def createtarget(self, lang, gentarget, dependees):
     predicates = self.genlangs()

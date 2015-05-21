@@ -52,7 +52,7 @@ class SimpleCodegenTask(Task):
     raise SimpleCodegenTask.UnimplementedError('sources_generated_by_target')
 
   def codegen_targets(self):
-    """Finds codegen targets in the depencency graph (?).
+    """Finds codegen targets in the depencency graph.
 
     :return: an iterable of dependency targets.
     """
@@ -125,4 +125,4 @@ class SimpleCodegenTask(Task):
   class UnimplementedError(Exception):
     """Raised if subclasses fail to implement vital methods when they are called."""
     def __init__(self, method):
-      super(Exception, self).__init__('{method} hasn\'t been implemented by subclass!'.format(method=method))
+      super(Exception, self).__init__('{} hasn\'t been implemented by subclass!'.format(method))
