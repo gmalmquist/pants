@@ -113,11 +113,6 @@ class ProtobufGen(SimpleCodegenTask):
   def is_gentarget(self, target):
     return isinstance(target, JavaProtobufLibrary)
 
-  def execute_codegen(self, invalid_targets):
-    # TODO(gm): Change this logic depending on isolation strategy, when that exists.
-    # This particular logic is global.
-    self._execute_individual_codegen(invalid_targets)
-
   def sources_generated_by_target(self, target):
     genfiles = []
     for source in target.sources_relative_to_source_root():
@@ -125,7 +120,7 @@ class ProtobufGen(SimpleCodegenTask):
       genfiles.extend(self.calculate_genfiles(path, source))
     return genfiles
 
-  def _execute_individual_codegen(self, targets):
+  def execute_codegen(self, targets):
     if not targets:
       raise ValueError('Protobuffer code-generation targets set is empty.')
 
@@ -143,9 +138,8 @@ class ProtobufGen(SimpleCodegenTask):
     check_duplicate_conflicting_protos(self, sources_by_base, sources, self.context.log)
 
     for target in targets:
-      # NOTE(gm): If the strategy is set to 'isolated' (once codegen strategies are implemented), then
-      # 'targets' should contain only a single element, which means this simply sets the output
-      # directory depending on that element.
+      # NOTE(gm): If the strategy is set to 'isolated', then 'targets' should contain only a single
+      # element, which means this simply sets the output directory depending on that element.
       # If the strategy is set to 'global', the target passed in as a parameter here will be
       # completely arbitrary, but that's OK because the codegen_workdir function completely
       # ignores the target parameter when using a global strategy.
@@ -237,7 +231,7 @@ class ProtobufGen(SimpleCodegenTask):
   def calculate_genfiles(self, path, source):
     protobuf_parse = ProtobufParse(path, source)
     protobuf_parse.parse()
-    return set(self.calculate_java_genfiles(protobuf_parse))
+    return OrderedSet(self.calculate_java_genfiles(protobuf_parse))
 
   def calculate_java_genfiles(self, protobuf_parse):
     basepath = protobuf_parse.package.replace('.', os.path.sep)

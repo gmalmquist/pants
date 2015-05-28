@@ -74,6 +74,22 @@ python_tests(
 )
 
 python_tests(
+  name = 'simple_codegen_task',
+  sources = ['test_simple_codegen_task.py'],
+  dependencies = [
+    '3rdparty/python/twitter/commons:twitter.common.collections',
+    'src/python/pants/backend/codegen/targets:java',
+    'src/python/pants/backend/codegen/tasks:simple_codegen_task',
+    'src/python/pants/backend/codegen:plugin',
+    'src/python/pants/backend/core:plugin',
+    'src/python/pants/base:source_root',
+    'src/python/pants/base:validation',
+    'src/python/pants/util:contextutil',
+    'tests/python/pants_test/tasks:task_test_base',
+  ],
+)
+
+python_tests(
   name = 'wire_gen',
   sources = ['test_wire_gen.py'],
   dependencies = [

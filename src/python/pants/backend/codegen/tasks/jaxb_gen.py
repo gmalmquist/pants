@@ -22,6 +22,10 @@ from pants.util.dirutil import safe_mkdir
 class JaxbGen(SimpleCodegenTask, NailgunTask):
   """Generates java source files from jaxb schema (.xsd)."""
 
+  @classmethod
+  def register_options(cls, register):
+    super(JaxbGen, cls).register_options(register)
+
   def __init__(self, *args, **kwargs):
     """
     :param context: inherited parameter from Task

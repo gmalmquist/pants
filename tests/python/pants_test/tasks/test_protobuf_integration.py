@@ -65,54 +65,67 @@ class ProtobufIntegrationTest(PantsRunIntegrationTest):
     self.assertIn("Message is: Hello World!", java_out)
 
   def test_source_ordering(self):
-    # force a compile to happen, we count on compile output in this test
-    self.assert_success(self.run_pants(['clean-all']))
+    expected_blocks = {
+      'global': 1,
+      'isolated': 3,
+    }
+    for gen_strategy in ('global', 'isolated',):
+      # force a compile to happen, we count on compile output in this test
+      self.assert_success(self.run_pants(['clean-all']))
 
-    # TODO(John Sirois): We should not have to pass `--no-colors` since the pants subprocess
-    # has no terminal attached - ie: colors should be turned off by default in this case.
-    pants_run = self.run_pants(['gen.protoc',
-                                '--lang=java',
-                                'testprojects/src/java/org/pantsbuild/testproject/proto-ordering',
-                                '--level=debug',
-                                '--no-colors'])
-    self.assert_success(pants_run)
+      # TODO(John Sirois): We should not have to pass `--no-colors` since the pants subprocess
+      # has no terminal attached - ie: colors should be turned off by default in this case.
+      pants_run = self.run_pants(['gen.protoc',
+                                  '--lang=java',
+                                  'testprojects/src/java/org/pantsbuild/testproject/proto-ordering',
+                                  '--level=debug',
+                                  '--no-colors',
+                                  '--gen-protoc-strategy={0}'.format(gen_strategy)])
+      self.assert_success(pants_run)
 
-    def find_protoc_blocks(lines):
-      block = []
-      for line in lines:
-        if block:
-          if line.strip():
-            block.append(line.strip())
-          else:
-            yield block
-            block = []
-          continue
-        if re.search(r'Executing: .*?\bprotoc', line):
-          block.append(line)
+      def find_protoc_blocks(lines):
+        block = []
+        for line in lines:
+          if re.search(r'Executing: .*?\bprotoc', line):
+            if block:
+              yield block
+              block = []
+            block.append(line)
+          elif block:
+            if line.strip():
+              block.append(line.strip())
+            else:
+              yield block
+              block = []
+            continue
 
-    # Scraping debug statements for protoc compilation.
-    all_blocks = list(find_protoc_blocks(pants_run.stdout_data.split('\n')))
-    self.assertEquals(len(all_blocks), 1,
-        'Expected there to be exactly one protoc compilation group! (Were {count}.)\n{out}'
-        .format(count=len(all_blocks), out=pants_run.stderr_data))
+      # Scraping debug statements for protoc compilation.
+      all_blocks = list(find_protoc_blocks(pants_run.stdout_data.split('\n')))
+      self.assertEquals(len(all_blocks), expected_blocks[gen_strategy],
+          'Expected there to be exactly {expected} protoc compilation group! (Were {count}.)\n{out}'
+          .format(expected=expected_blocks[gen_strategy], count=len(all_blocks),
+                  out=pants_run.stderr_data))
 
-    block = all_blocks[0]
-    seen_extracted = False
-    last_proto = -1
-    for line in block:
-      # Make sure import bases appear after the bases for actual sources.
-      if line.startswith('--proto_path='):
-        if re.search(r'\bextracted\b', line):
-          seen_extracted = True
-        else:
-          self.assertFalse(seen_extracted,
-              'Local protoc bases must be ordered before imported bases!')
-        continue
-      # Check to make sure, eg, testproto4.proto never preceedes testproto2.proto.
-      match = re.search(r'(?P<sequence>\d+)\.proto\\?$', line)
-      if match:
-        number = int(match.group('sequence'))
-        self.assertTrue(number > last_proto, '{proto} succeeded proto #{number}!'.format(
-            proto=line, number=last_proto))
-        last_proto = number
-    self.assertEquals(last_proto, 6, 'Not all protos were seen!')
+      biggest_proto = -1
+      for block in all_blocks:
+        last_proto = -1
+        seen_extracted = False
+        for line in block:
+          # Make sure import bases appear after the bases for actual sources.
+          if line.startswith('--proto_path='):
+            if re.search(r'\bextracted\b', line):
+              seen_extracted = True
+            else:
+              self.assertFalse(seen_extracted,
+                  'Local protoc bases must be ordered before imported bases!')
+            continue
+          # Check to make sure, eg, testproto4.proto never preceedes testproto2.proto.
+          match = re.search(r'(?P<sequence>\d+)\.proto\\?$', line)
+          if match:
+            number = int(match.group('sequence'))
+            self.assertTrue(number > last_proto, '{proto} succeeded proto #{number}!'
+                            .format(proto=line, number=last_proto))
+            last_proto = number
+        if last_proto > biggest_proto:
+          biggest_proto = last_proto
+      self.assertEquals(biggest_proto, 6, 'Not all protos were seen!')
