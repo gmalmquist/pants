@@ -139,6 +139,7 @@ class WireGenTest(TaskTestBase):
         sources=['foo.proto'],
       )
       '''))
+    self.create_file('wire-lib/foo.proto', '/* ... empty ... */')
     target = self.target('wire-lib:wire-target')
     context = self.context(target_roots=[target])
     task = self.create_task(context)
@@ -153,6 +154,7 @@ class WireGenTest(TaskTestBase):
         sources=['foo.proto'],
       )
       '''))
+    self.create_file('project/src/main/wire/wire-lib/foo.proto', '/* ... empty ... */')
     target = self.target('project/src/main/wire/wire-lib:wire-target')
     context = self.context(target_roots=[target])
     task = self.create_task(context)
