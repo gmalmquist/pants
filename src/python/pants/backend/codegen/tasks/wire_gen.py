@@ -65,6 +65,48 @@ class WireGen(JvmToolTaskMixin, SimpleCodegenTask):
   def synthetic_target_extra_dependencies(self, target):
     return self.resolve_deps(self.get_options().javadeps)
 
+  @classmethod
+  def _symlink_maybe(cls, src_dir, dst_dir, rel_path):
+    abs_src_path = os.path.join(src_dir, rel_path)
+    abs_dst_path = os.path.join(dst_dir, rel_path)
+    if not os.path.exists(abs_src_path) or os.path.exists(abs_dst_path):
+      return False
+    if not os.path.exists(os.path.dirname(abs_dst_path)):
+      os.makedirs(os.path.dirname(abs_dst_path))
+    os.symlink(abs_src_path, abs_dst_path)
+    return True
+
+  def _calculate_proto_paths(self, target):
+    proto_paths = OrderedSet()
+    proto_paths.add(os.path.join(get_buildroot(), SourceRoot.find(target)))
+
+    def add_sources_for(dep):
+      if not dep.has_sources():
+        return
+      for source in dep.sources_relative_to_buildroot():
+        if source.endswith('.proto'):
+          root = SourceRoot.find_by_path(source)
+          if root:
+            proto_paths.add(os.path.join(get_buildroot(), root))
+
+    add_sources_for(target)
+    target.walk(add_sources_for)
+    return proto_paths
+
+  def _proto_repo_directory(self, target):
+    proto_paths = self._calculate_proto_paths(target)
+    if len(proto_paths) == 1:
+      for proto_path in proto_paths:
+        return proto_path
+    proto_repo = os.path.join(self.codegen_workdir(target), 'proto-repo')
+    for proto_path in proto_paths:
+      for (directory, folder, files) in os.walk(proto_path):
+        protos = [os.path.relpath(os.path.join(directory, proto), proto_path)
+                  for proto in files if proto.endswith('.proto')]
+        for proto in protos:
+          self._symlink_maybe(proto_path, proto_repo, proto)
+    return proto_repo
+
   def execute_codegen(self, targets):
     # Invoke the generator once per target.  Because the wire compiler has flags that try to reduce
     # the amount of code emitted, Invoking them all together will break if one target specifies a
@@ -88,8 +130,6 @@ class WireGen(JvmToolTaskMixin, SimpleCodegenTask):
 
       args = ['--java_out={0}'.format(self.codegen_workdir(target))]
 
-      # Add all params in payload to args
-
       if target.payload.get_field_value('no_options'):
         args.append('--no_options')
 
@@ -107,10 +147,18 @@ class WireGen(JvmToolTaskMixin, SimpleCodegenTask):
       if target.payload.enum_options:
         args.append('--enum_options={0}'.format(','.join(target.payload.enum_options)))
 
-      args.append('--proto_path={0}'.format(os.path.join(get_buildroot(),
-                                                         SourceRoot.find(target))))
+      proto_path = self._proto_repo_directory(target)
+      args.append('--proto_path={0}'.format(os.path.join(proto_path)))
 
       args.extend(relative_sources)
+      args.extend(target.payload.virtual_sources)
+
+      logger.debug('\nWire generating for {}'.format(target.address.spec))
+      logger.debug('  Real Sources')
+      logger.debug('\n'.join('    {}'.format(src) for src in relative_sources))
+      if target.payload.virtual_sources:
+        logger.debug('  Virtual Sources')
+        logger.debug('\n'.join('    {}'.format(src) for src in target.payload.virtual_sources))
 
       result = util.execute_java(classpath=self.tool_classpath('wire-compiler'),
                                  main='com.squareup.wire.WireCompiler',
