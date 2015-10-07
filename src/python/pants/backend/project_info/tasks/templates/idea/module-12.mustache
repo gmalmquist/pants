@@ -34,13 +34,13 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
     {{#module.content_roots}}
       {{#sources}}
         {{#package_prefix}}
-      <sourceFolder url="file://{{module.root_dir}}/{{path}}"
+      <sourceFolder url="file://{{path}}"
                     isTestSource="{{is_test}}"
                     {{#content_type}}type="{{content_type}}"{{/content_type}}
                     packagePrefix="{{package_prefix}}"/>
         {{/package_prefix}}
         {{^package_prefix}}
-      <sourceFolder url="file://{{module.root_dir}}/{{path}}"
+      <sourceFolder url="file://{{path}}"
                     isTestSource="{{is_test}}"
                     {{#content_type}}type="{{content_type}}"{{/content_type}}/>
         {{/package_prefix}}
@@ -90,25 +90,28 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
         </SOURCES>
       </library>
     </orderEntry>
-    <orderEntry type="module-library">
+    <orderEntry type="module-library" exported="">
       <library name="external">
         <CLASSES>
-          {{#module.external_jars}}
+          {{#module.external_libraries.default}}
           <root url="jar://{{.}}!/" />
-          {{/module.external_jars}}
+          {{/module.external_libraries.default}}
         </CLASSES>
         <JAVADOC>
-          {{#module.external_javadoc_jars}}
+          {{#module.external_libraries.javadoc}}
           <root url="jar://{{.}}!/" />
-          {{/module.external_javadoc_jars}}
+          {{/module.external_libraries.javadoc}}
         </JAVADOC>
         <SOURCES>
-          {{#module.external_source_jars}}
+          {{#module.external_libraries.sources}}
           <root url="jar://{{.}}!/" />
-          {{/module.external_source_jars}}
+          {{/module.external_libraries.sources}}
         </SOURCES>
       </library>
     </orderEntry>
+    {{#module.module_dependencies}}
+    <orderEntry type="module" module-name="{{.}}" exported="" />
+    {{/module.module_dependencies}}
   </component>
 
 {{#module.extra_components}}

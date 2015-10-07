@@ -16,8 +16,9 @@ from pants.backend.core.targets.resources import Resources
 from pants.backend.jvm.targets.annotation_processor import AnnotationProcessor
 from pants.backend.jvm.targets.scala_library import ScalaLibrary
 from pants.backend.jvm.tasks.classpath_products import ClasspathProducts
-from pants.backend.jvm.tasks.ivy_task_mixin import IvyTaskMixin
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
+from pants.backend.project_info.tasks.export import ExportTask
+from pants.base.address import BuildFileAddress
 from pants.base.build_environment import get_buildroot
 from pants.base.exceptions import TaskError
 from pants.base.source_root import SourceRoot
@@ -43,7 +44,7 @@ def is_java(target):
   return target.has_sources('.java') or target.is_java
 
 
-class IdeGen(IvyTaskMixin, NailgunTask):
+class IdeGen(ExportTask, NailgunTask):
 
   @classmethod
   def register_options(cls, register):
@@ -353,6 +354,9 @@ class IdeGen(IvyTaskMixin, NailgunTask):
     idefile = self.generate_project(self._project)
     if idefile:
       binary_util.ui_open(idefile)
+
+  def open_ide(self, idefile):
+    binary_util.ui_open(idefile)
 
   def generate_project(self, project):
     raise NotImplementedError('Subclasses must generate a project for an ide')

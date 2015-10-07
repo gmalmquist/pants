@@ -22,7 +22,11 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
         {{#project.annotation_processing.processors}}
           <processor name="{{class_name}}" />
         {{/project.annotation_processing.processors}}
-        <processorPath useClasspath="true" />
+        <processorPath useClasspath="false">
+        {{#project.annotation_processing.classpath}}
+          <entry name="{{.}}" />
+        {{/project.annotation_processing.classpath}}
+        </processorPath>
       </profile>
     </annotationProcessing>
   </component>
@@ -36,7 +40,8 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
     <modules>
       {{#project.modules}}
       <module fileurl="file://{{path}}"
-              filepath="{{path}}"/>
+              filepath="{{path}}"
+              {{#group?}}group="{{group}}"{{/group?}}/>
       {{/project.modules}}
     </modules>
   </component>
