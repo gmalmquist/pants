@@ -7,22 +7,17 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import os
 import pkgutil
-import re
 import shutil
-import sys
 import tempfile
 from collections import defaultdict, namedtuple
 from xml.dom import minidom
 
-from pants.backend.jvm.targets.java_tests import JavaTests
-from pants.backend.jvm.targets.jvm_target import JvmTarget
-from pants.backend.project_info.tasks.ide_gen import IdeGen, Project
-from pants.backend.python.targets.python_tests import PythonTests
+from pants.backend.project_info.tasks.export import ExportTask
 from pants.base.build_environment import get_buildroot
 from pants.base.generator import Generator, TemplateData
-from pants.base.source_root import SourceRoot
 from pants.scm.git import Git
 from pants.util.dirutil import safe_mkdir, safe_walk
+from pants.util.memo import memoized_property
 
 
 _TEMPLATE_BASEDIR = 'templates/idea'
@@ -45,7 +40,15 @@ _SCALA_VERSIONS = {
 }
 
 
-class IdeaGen(IdeGen):
+class IdeaGen(ExportTask):
+
+  class Module(namedtuple('Module', ['directory', 'targets'])):
+    @property
+    def name(self):
+      return '{}'.format(os.path.relpath(self.directory, get_buildroot()).replace(os.sep, '-'))
+    @property
+    def filename(self):
+      return '{}.iml'.format(self.name)
 
   @classmethod
   def register_options(cls, register):
@@ -94,6 +97,15 @@ class IdeaGen(IdeGen):
              help='Directory relative to --project-dir to write annotation processor sources.')
     register('--annotation-processor', action='append', advanced=True,
              help='Add a Class name of a specific annotation processor to run.')
+    register('--project-name', default='project',
+             help='Specifies the name to use for the generated project.')
+    register('--project-dir',
+             help='Specifies the directory to output the generated project files to.')
+    register('--project-cwd',
+             help='Specifies the directory the generated project should use as the cwd for '
+                  'processes it launches.  Note that specifying this trumps --{0}-project-dir '
+                  'and not all project related files will be stored there.'
+             .format(cls.options_scope))
 
   def __init__(self, *args, **kwargs):
     super(IdeaGen, self).__init__(*args, **kwargs)
@@ -123,6 +135,94 @@ class IdeaGen(IdeGen):
                                          '{}.ipr'.format(self.project_name))
     self.module_filename = os.path.join(self.gen_project_workdir,
                                         '{}.iml'.format(self.project_name))
+
+  @memoized_property
+  def gen_project_workdir(self):
+    if self.get_options().project_dir:
+      return os.path.abspath(os.path.join(self.get_options().project_dir, self.project_name))
+    return os.path.abspath(os.path.join(self.workdir, self.__class__.__name__, self.project_name))
+
+  @property
+  def project_name(self):
+    return self.get_options().project_name
+
+  @memoized_property
+  def cwd(self):
+    return (
+      os.path.abspath(self.get_options().project_cwd) if
+      self.get_options().project_cwd else self.gen_project_workdir
+    )
+
+  def execute(self):
+    targets = self.context.targets()
+    blob = self.generate_targets_map(targets)
+    configured_modules = dict(self._project_modules(blob))
+
+    outdir = os.path.abspath(self.intellij_output_dir)
+    if not os.path.exists(outdir):
+      os.makedirs(outdir)
+
+    lang_level = None
+    for target in targets:
+      if lang_level is None or target.platform.target_level > lang_level:
+        lang_level = target.platform.target_level
+
+    configured_project = TemplateData(
+      root_dir=get_buildroot(),
+      outdir=outdir,
+      git_root=Git.detect_worktree(),
+      modules=configured_modules.values(),
+      java=TemplateData(
+        encoding=self.java_encoding,
+        maximum_heap_size=self.java_maximum_heap_size,
+        jdk='{0}.{1}'.format(*lang_level[:2]),
+        language_level='JDK_{0}_{1}'.format(*lang_level[:2]),
+      ),
+      resource_extensions=[],
+      scala=None,
+      checkstyle_classpath=';'.join([]),
+      debug_port=None,
+      annotation_processing=self.annotation_processing_template(blob),
+      extra_components=[],
+    )
+
+    existing_project_components = None
+    if not self.nomerge:
+      # Grab the existing components, which may include customized ones.
+      existing_project_components = self._parse_xml_component_elements(self.project_filename)
+
+    # Generate (without merging in any extra components).
+    safe_mkdir(os.path.abspath(self.intellij_output_dir))
+
+    ipr = self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.project_template), project=configured_project))
+    imls = [(name, self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.module_template), module=module)))
+            for name, module in configured_modules.items()]
+
+    if not self.nomerge:
+      # Get the names of the components we generated, and then delete the
+      # generated files.  Clunky, but performance is not an issue, and this
+      # is an easy way to get those component names from the templates.
+      extra_project_components = self._get_components_to_merge(existing_project_components, ipr)
+      os.remove(ipr)
+
+      # Generate again, with the extra components.
+      ipr = self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.project_template),
+                                                 project=configured_project.extend(extra_components=extra_project_components)))
+
+    self.context.log.info('Generated IntelliJ project in {directory}'
+                          .format(directory=self.gen_project_workdir))
+
+    project_directory = os.path.dirname(self.project_filename)
+    for existing_project_file in os.listdir(project_directory):
+      if existing_project_file.endswith('.iml'):
+        os.remove(os.path.join(project_directory, existing_project_file))
+
+    shutil.move(ipr, self.project_filename)
+    for index, (name, iml) in enumerate(imls):
+      dirname, filename = os.path.split(self.module_filename)
+      shutil.move(iml, os.path.join(dirname, name))
+    if self.open:
+      self.open_ide(self.project_filename)
 
   def _content_type(self, target_data):
     language = 'java'
@@ -197,14 +297,6 @@ class IdeaGen(IdeGen):
           target['roots'] = [r for r in target['roots'] if r['source_root'] != root]
     return {spec: target for spec, target in all_targets.items() if target['roots']}
 
-  class Module(namedtuple('Module', ['directory', 'targets'])):
-    @property
-    def name(self):
-      return '{}'.format(os.path.relpath(self.directory, get_buildroot()).replace(os.sep, '-'))
-    @property
-    def filename(self):
-      return '{}.iml'.format(self.name)
-
   def _project_modules(self, blob):
     # blob['targets'] = self._dedup_targets(blob['targets'])
 
@@ -219,9 +311,10 @@ class IdeaGen(IdeGen):
       for target in module.targets:
         module_names_by_target[target['spec']] = module.name
 
-    thirdparty_pattern = re.compile(r'^3rdparty:.*')
-
-    annotation_processing_modules = set()
+    exclude_folders = []
+    if self.get_options().exclude_maven_target:
+      exclude_folders += IdeaGen._maven_targets_excludes(get_buildroot())
+    exclude_folders += self.get_options().exclude_folders
 
     # Map of name -> maps of confs to lists of jar paths.
     module_external_libraries = defaultdict(lambda: defaultdict(set))
@@ -261,8 +354,6 @@ class IdeaGen(IdeGen):
       module_dir, targets = module
       sources_by_root = {}
       for target_data in targets:
-        if target_data.get('pants_target_type') == 'annotation_processor':
-          annotation_processing_modules.add(module.name)
         for root in target_data['roots']:
           source_root = root['source_root']
           package_prefix = root['package_prefix']
@@ -326,7 +417,7 @@ class IdeaGen(IdeGen):
         internal_source_jars=[], # ???
         external_libraries=TemplateData(**{conf: list(jars) for conf, jars in module_external_libraries[module.name].items()}),
         extra_components=[],
-        exclude_folders=[],
+        exclude_folders=exclude_folders,
         java_language_level=self._java_language_level(blob, target_data),
         module_dependencies=sorted(dependencies),
         group=module_group,
@@ -341,84 +432,9 @@ class IdeaGen(IdeGen):
       java_language_level='JDK_1_7',
       group='temporary-pants-cache',
       annotation_processing=self.annotation_processing_template(blob),
+      exclude_folders=exclude_folders,
       module_dependencies=[],
     )
-
-  def execute(self):
-    targets = self.context.targets()
-    blob = self.generate_targets_map(targets)
-    configured_modules = dict(self._project_modules(blob))
-
-    outdir = os.path.abspath(self.intellij_output_dir)
-    if not os.path.exists(outdir):
-      os.makedirs(outdir)
-
-    configured_project = TemplateData(
-      root_dir=get_buildroot(),
-      outdir=outdir,
-      git_root=Git.detect_worktree(),
-      modules=configured_modules.values(),
-      java=TemplateData(
-        encoding=self.java_encoding,
-        maximum_heap_size=self.java_maximum_heap_size,
-        jdk=self.java_jdk,
-        language_level='JDK_1_{}'.format(self.java_language_level)
-      ),
-      resource_extensions=[],
-      scala=None,
-      checkstyle_classpath=';'.join([]),
-      debug_port=None,
-      annotation_processing=self.annotation_processing_template(blob),
-      extra_components=[],
-    )
-
-
-    existing_project_components = None
-    existing_module_components = None
-    if not self.nomerge:
-      # Grab the existing components, which may include customized ones.
-      existing_project_components = self._parse_xml_component_elements(self.project_filename)
-      existing_module_components = self._parse_xml_component_elements(self.module_filename)
-
-    # Generate (without merging in any extra components).
-    safe_mkdir(os.path.abspath(self.intellij_output_dir))
-
-    print('\n\n')
-
-    ipr = self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.project_template), project=configured_project))
-    imls = [(name, self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.module_template), module=module)))
-            for name, module in configured_modules.items()]
-
-    if not self.nomerge:
-      # Get the names of the components we generated, and then delete the
-      # generated files.  Clunky, but performance is not an issue, and this
-      # is an easy way to get those component names from the templates.
-      extra_project_components = self._get_components_to_merge(existing_project_components, ipr)
-      os.remove(ipr)
-
-      # Generate again, with the extra components.
-      ipr = self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.project_template),
-                                                 project=configured_project.extend(extra_components=extra_project_components)))
-      print('ipr2: {}'.format(ipr))
-      # iml = self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.module_template),
-      #                                            module=configured_module.extend(extra_components=extra_module_components)))
-      # print('iml2: {}'.format(iml))
-
-
-    self.context.log.info('Generated IntelliJ project in {directory}'
-                          .format(directory=self.gen_project_workdir))
-
-    project_directory = os.path.dirname(self.project_filename)
-    for existing_project_file in os.listdir(project_directory):
-      if existing_project_file.endswith('.iml'):
-        os.remove(os.path.join(project_directory, existing_project_file))
-
-    shutil.move(ipr, self.project_filename)
-    for index, (name, iml) in enumerate(imls):
-      dirname, filename = os.path.split(self.module_filename)
-      shutil.move(iml, os.path.join(dirname, name))
-    if self.open:
-      self.open_ide(self.project_filename)
 
 
   @staticmethod
@@ -428,36 +444,6 @@ class IdeaGen(IdeGen):
       if "pom.xml" in filenames:
         excludes.append(os.path.join(os.path.relpath(dirpath, start=repo_root), "target"))
     return excludes
-
-  @staticmethod
-  def _sibling_is_test(source_set):
-    """Determine if a SourceSet represents a test path.
-
-    Non test targets that otherwise live in test target roots (say a java_library), must
-    be marked as test for IDEA to correctly link the targets with the test code that uses
-    them. Therefore we check to see if the source root registered to the path or any of its sibling
-    source roots are defined with a test type.
-
-    :param source_set: SourceSet to analyze
-    :returns: True if the SourceSet represents a path containing tests
-    """
-
-    def has_test_type(types):
-      for target_type in types:
-        # TODO(Eric Ayers) Find a way for a target to identify itself instead of a hard coded list
-        if target_type in (JavaTests, PythonTests):
-          return True
-      return False
-
-    if source_set.path:
-      path = os.path.join(source_set.source_base, source_set.path)
-    else:
-      path = source_set.source_base
-    sibling_paths = SourceRoot.find_siblings_by_path(path)
-    for sibling_path in sibling_paths:
-      if has_test_type(SourceRoot.types(sibling_path)):
-        return True
-    return False
 
   def annotation_processing_template(self, export_blob=None):
     classpath = None
@@ -481,132 +467,6 @@ class IdeaGen(IdeGen):
       classpath=classpath,
     )
 
-  def generate_project(self, project):
-    def create_content_root(source_set):
-      root_relative_path = os.path.join(source_set.source_base, source_set.path) \
-                           if source_set.path else source_set.source_base
-
-      if self.get_options().infer_test_from_siblings:
-        is_test = IdeaGen._sibling_is_test(source_set)
-      else:
-        is_test = source_set.is_test
-
-      if source_set.resources_only:
-        if source_set.is_test:
-          content_type = 'java-test-resource'
-        else:
-          content_type = 'java-resource'
-      else:
-        content_type = ''
-
-
-    content_roots = [create_content_root(source_set) for source_set in project.sources]
-    if project.has_python:
-      content_roots.extend(create_content_root(source_set) for source_set in project.py_sources)
-
-    scala = None
-    if project.has_scala:
-      scala = TemplateData(
-        language_level=self.scala_language_level,
-        maximum_heap_size=self.scala_maximum_heap_size,
-        fsc=self.fsc,
-        compiler_classpath=project.scala_compiler_classpath
-      )
-
-    exclude_folders = []
-    if self.get_options().exclude_maven_target:
-      exclude_folders += IdeaGen._maven_targets_excludes(get_buildroot())
-    exclude_folders += self.get_options().exclude_folders
-
-    java_language_level = None
-    for target in project.targets:
-      if isinstance(target, JvmTarget):
-        if java_language_level is None or java_language_level < target.platform.source_level:
-          java_language_level = target.platform.source_level
-    if java_language_level is not None:
-      java_language_level = 'JDK_{0}_{1}'.format(*java_language_level.components[:2])
-
-    configured_module = TemplateData(
-      root_dir=get_buildroot(),
-      path=self.module_filename,
-      content_roots=content_roots,
-      bash=self.bash,
-      python=project.has_python,
-      scala=scala,
-      internal_jars=[cp_entry.jar for cp_entry in project.internal_jars],
-      internal_source_jars=[cp_entry.source_jar for cp_entry in project.internal_jars
-                            if cp_entry.source_jar],
-      external_jars=[cp_entry.jar for cp_entry in project.external_jars],
-      external_javadoc_jars=[cp_entry.javadoc_jar for cp_entry in project.external_jars
-                             if cp_entry.javadoc_jar],
-      external_source_jars=[cp_entry.source_jar for cp_entry in project.external_jars
-                            if cp_entry.source_jar],
-      annotation_processing=self.annotation_processing_template(),
-      extra_components=[],
-      exclude_folders=exclude_folders,
-      java_language_level=java_language_level,
-    )
-
-    outdir = os.path.abspath(self.intellij_output_dir)
-    if not os.path.exists(outdir):
-      os.makedirs(outdir)
-
-    configured_project = TemplateData(
-      root_dir=get_buildroot(),
-      outdir=outdir,
-      git_root=Git.detect_worktree(),
-      modules=[configured_module],
-      java=TemplateData(
-        encoding=self.java_encoding,
-        maximum_heap_size=self.java_maximum_heap_size,
-        jdk=self.java_jdk,
-        language_level='JDK_1_{}'.format(self.java_language_level)
-      ),
-      resource_extensions=list(project.resource_extensions),
-      scala=scala,
-      checkstyle_classpath=';'.join(project.checkstyle_classpath),
-      debug_port=project.debug_port,
-      annotation_processing=self.annotation_processing_template(),
-      extra_components=[],
-    )
-
-    existing_project_components = None
-    existing_module_components = None
-    if not self.nomerge:
-      # Grab the existing components, which may include customized ones.
-      existing_project_components = self._parse_xml_component_elements(self.project_filename)
-      existing_module_components = self._parse_xml_component_elements(self.module_filename)
-
-    # Generate (without merging in any extra components).
-    safe_mkdir(os.path.abspath(self.intellij_output_dir))
-
-    ipr = self._generate_to_tempfile(
-        Generator(pkgutil.get_data(__name__, self.project_template), project=configured_project))
-    iml = self._generate_to_tempfile(
-        Generator(pkgutil.get_data(__name__, self.module_template), module=configured_module))
-
-    if not self.nomerge:
-      # Get the names of the components we generated, and then delete the
-      # generated files.  Clunky, but performance is not an issue, and this
-      # is an easy way to get those component names from the templates.
-      extra_project_components = self._get_components_to_merge(existing_project_components, ipr)
-      extra_module_components = self._get_components_to_merge(existing_module_components, iml)
-      os.remove(ipr)
-      os.remove(iml)
-
-      # Generate again, with the extra components.
-      ipr = self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.project_template),
-          project=configured_project.extend(extra_components=extra_project_components)))
-      iml = self._generate_to_tempfile(Generator(pkgutil.get_data(__name__, self.module_template),
-          module=configured_module.extend(extra_components=extra_module_components)))
-
-    self.context.log.info('Generated IntelliJ project in {directory}'
-                           .format(directory=self.gen_project_workdir))
-
-    shutil.move(ipr, self.project_filename)
-    shutil.move(iml, self.module_filename)
-    return self.project_filename if self.open else None
-
   def _generate_to_tempfile(self, generator):
     """Applies the specified generator to a temp file and returns the path to that file.
     We generate into a temp file so that we don't lose any manual customizations on error."""
@@ -614,17 +474,6 @@ class IdeaGen(IdeGen):
     with os.fdopen(output_fd, 'w') as output:
       generator.write(output)
     return output_path
-
-  def _get_resource_extensions(self, project):
-    resource_extensions = set()
-    resource_extensions.update(project.resource_extensions)
-
-    # TODO(John Sirois): make test resources 1st class in ant build and punch this through to pants
-    # model
-    for _, _, files in safe_walk(os.path.join(get_buildroot(), 'tests', 'resources')):
-      resource_extensions.update(Project.extract_resource_extensions(files))
-
-    return resource_extensions
 
   def _parse_xml_component_elements(self, path):
     """Returns a list of pairs (component_name, xml_fragment) where xml_fragment is the xml text of

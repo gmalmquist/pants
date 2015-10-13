@@ -140,14 +140,14 @@ python_library(
     ':idea_gen_resources',
   ],
   dependencies = [
-    ':ide_gen',
+    ':export',
     'src/python/pants/base:build_environment',
     'src/python/pants/base:generator',
-    'src/python/pants/base:source_root',
     'src/python/pants/backend/jvm/targets:java',
     'src/python/pants/backend/python/targets:python',
     'src/python/pants/scm:git',
     'src/python/pants/util:dirutil',
+    'src/python/pants/util:memo',
   ],
 )
 
