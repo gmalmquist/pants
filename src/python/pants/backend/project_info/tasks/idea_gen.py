@@ -12,9 +12,11 @@ import tempfile
 from collections import defaultdict, namedtuple
 from xml.dom import minidom
 
+from pants.backend.jvm.targets.jvm_target import JvmTarget
 from pants.backend.project_info.tasks.export import ExportTask
 from pants.base.build_environment import get_buildroot
 from pants.base.generator import Generator, TemplateData
+from pants.binaries import binary_util
 from pants.scm.git import Git
 from pants.util.dirutil import safe_mkdir, safe_walk
 from pants.util.memo import memoized_property
@@ -164,8 +166,9 @@ class IdeaGen(ExportTask):
 
     lang_level = None
     for target in targets:
-      if lang_level is None or target.platform.target_level > lang_level:
-        lang_level = target.platform.target_level
+      if isinstance(target, JvmTarget):
+        if lang_level is None or target.platform.target_level > lang_level:
+          lang_level = target.platform.target_level
 
     configured_project = TemplateData(
       root_dir=get_buildroot(),
@@ -175,8 +178,8 @@ class IdeaGen(ExportTask):
       java=TemplateData(
         encoding=self.java_encoding,
         maximum_heap_size=self.java_maximum_heap_size,
-        jdk='{0}.{1}'.format(*lang_level[:2]),
-        language_level='JDK_{0}_{1}'.format(*lang_level[:2]),
+        jdk='{0}.{1}'.format(*lang_level.components[:2]),
+        language_level='JDK_{0}_{1}'.format(*lang_level.components[:2]),
       ),
       resource_extensions=[],
       scala=None,
@@ -222,7 +225,7 @@ class IdeaGen(ExportTask):
       dirname, filename = os.path.split(self.module_filename)
       shutil.move(iml, os.path.join(dirname, name))
     if self.open:
-      self.open_ide(self.project_filename)
+      binary_util.ui_open(self.project_filename)
 
   def _content_type(self, target_data):
     language = 'java'

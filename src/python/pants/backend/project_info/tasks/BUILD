@@ -145,6 +145,7 @@ python_library(
     'src/python/pants/base:generator',
     'src/python/pants/backend/jvm/targets:java',
     'src/python/pants/backend/python/targets:python',
+    'src/python/pants/binaries:binary_util',
     'src/python/pants/scm:git',
     'src/python/pants/util:dirutil',
     'src/python/pants/util:memo',
