@@ -72,13 +72,17 @@ class IdeaProject(object):
       return '{}.iml'.format(self.name)
 
   def __init__(self, blob, output_directory, workdir, maven_style=True, exclude_folders=None,
-               annotation_processing=None):
+               annotation_processing=None, bash=None, java_encoding=None,
+               java_maximum_heap_size=None):
     self.blob = blob
     self.maven_style = maven_style
     self.global_excludes = exclude_folders or ()
     self.workdir = workdir
     self.output_directory = output_directory or os.path.abspath('.')
     self.annotation_processing = annotation_processing
+    self.bash = bash
+    self.java_encoding = java_encoding
+    self.java_maximum_heap_size = java_maximum_heap_size
     self.modules = [self.Module(module_dir, self.targets_by_source_root[module_dir])
                     for module_dir in sorted(self.targets_by_source_root)]
     self._compute_module_dependencies()
@@ -93,7 +97,7 @@ class IdeaProject(object):
           excludes.add(target)
       parent = os.path.dirname(path)
       if parent != path:
-        excludes.extend(self._maven_excludes(parent))
+        excludes.update(self._maven_excludes(parent))
     return excludes
 
   def _compute_module_dependencies(self):
@@ -133,7 +137,7 @@ class IdeaProject(object):
       for target in module.targets:
         yield module, target
 
-  @property
+  @memoized_property
   def targets_by_source_root(self):
     targets_by_module = defaultdict(list)
     for target_spec, target_data in self.blob['targets'].items():
@@ -200,15 +204,14 @@ class IdeaProject(object):
 
   def _generate_module_templates(self):
     for module in self.modules:
-      module_dir, targets = module
       sources_by_root = {}
-      for target_data in targets:
+      for target_data in module.targets:
         for root in target_data['roots']:
           source_root = root['source_root']
           package_prefix = root['package_prefix']
           if not source_root.startswith(module.directory):
             continue
-          module.excludes.add(os.path.relpath(self._maven_excludes(source_root)))
+          module.excludes.update(self._maven_excludes(os.path.relpath(source_root, get_buildroot())))
           if self.maven_style:
             # Truncate source root, so that targets are listed under src/test/** rather than
             # src/test/com/foobar/package1/*, src/test/com/foobar/package2/* individually.
@@ -253,25 +256,27 @@ class IdeaProject(object):
       dependencies = module.dependencies
       dependencies.add('annotation-processing-code')
 
+      python = any(target.get('python_interpreter') for target in module.targets)
+
       yield module.filename, TemplateData(
-        root_dir=module_dir,
+        root_dir=module.directory,
         path='$PROJECT_DIR$/{}'.format(module.filename),
         content_roots=[content_root],
         bash=self.bash,
-        python='python_interpreter' in target_data,
-        scala=False, # ???
-        internal_jars=[], # ???
-        internal_source_jars=[], # ???
+        python=python,
+        scala=False, # NB(gmalmquist): We don't use Scala, change this if we ever do.
+        internal_jars=[], # NB(gmalmquist): These two fields seem to be extraneous.
+        internal_source_jars=[],
         external_libraries=TemplateData(**{conf: list(jars) for conf, jars in module.libraries.items()}),
         extra_components=[],
-        exclude_folders=module.excludes | self.global_excludes,
+        exclude_folders=sorted(module.excludes | set(self.global_excludes)),
         java_language_level=self._java_language_level(target_data),
         module_dependencies=sorted(dependencies),
         group=module_group,
       )
 
     yield 'annotation-processing-code.iml', TemplateData(
-      root_dir=self.gen_project_workdir,
+      root_dir=self.workdir,
       path='$PROJECT_DIR$/annotation-processing-code.iml',
       content_roots=[],
       python=False,
@@ -322,7 +327,7 @@ class IdeaGen(ExportTask):
     super(IdeaGen, cls).register_options(register)
     register('--version', choices=sorted(list(_VERSIONS.keys())), default='11',
              help='The IntelliJ IDEA version the project config should be generated for.')
-    register('--merge', action='store_true', default=True,
+    register('--merge', action='store_true', default=False,
              help='Merge any manual customizations in existing '
                   'Intellij IDEA configuration. If False, manual customizations '
                   'will be over-written.')
@@ -438,11 +443,14 @@ class IdeaGen(ExportTask):
     )
 
     project = IdeaProject(blob,
-                             maven_style=self.get_options().maven_style,
-                             exclude_folders=self.get_options().exclude_folders,
-                             output_directory=outdir,
-                             workdir=self.gen_project_workdir,
-                             annotation_processing=annotation_processing)
+                          output_directory=outdir,
+                          workdir=self.gen_project_workdir,
+                          maven_style=self.get_options().maven_style,
+                          exclude_folders=self.get_options().exclude_folders,
+                          annotation_processing=annotation_processing,
+                          bash=self.bash,
+                          java_encoding=self.java_encoding,
+                          java_maximum_heap_size=self.java_maximum_heap_size)
 
     configured_modules = project.module_templates_by_filename
     configured_project = project.project_template
