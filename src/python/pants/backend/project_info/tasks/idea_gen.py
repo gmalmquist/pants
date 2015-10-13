@@ -12,14 +12,14 @@ import tempfile
 from collections import defaultdict, namedtuple
 from xml.dom import minidom
 
-from pants.backend.jvm.targets.jvm_target import JvmTarget
 from pants.backend.project_info.tasks.export import ExportTask
 from pants.base.build_environment import get_buildroot
 from pants.base.generator import Generator, TemplateData
+from pants.base.revision import Revision
 from pants.binaries import binary_util
 from pants.scm.git import Git
 from pants.util.dirutil import safe_mkdir, safe_walk
-from pants.util.memo import memoized_property
+from pants.util.memo import memoized_method, memoized_property
 
 
 _TEMPLATE_BASEDIR = 'templates/idea'
@@ -42,15 +42,280 @@ _SCALA_VERSIONS = {
 }
 
 
-class IdeaGen(ExportTask):
+_TARGET_TYPE_HIERARCHY = {
+  type_: index for index, type_ in enumerate(('TEST_RESOURCE', 'TEST', 'RESOURCE', 'SOURCE'))
+}
 
-  class Module(namedtuple('Module', ['directory', 'targets'])):
-    @property
+
+class IdeaProject(object):
+  """Constructs data for an IntelliJ project."""
+
+  AnnotationProcessing = namedtuple('AnnotationProcessing', ['enabled', 'sources_dir',
+                                                             'test_sources_dir', 'processors'])
+
+  class Module(object):
+    """Represents a module in an IntelliJ project."""
+
+    def __init__(self, directory, targets):
+      self.directory = directory
+      self.targets = targets
+      self.dependencies = set()
+      self.libraries = defaultdict(set)
+      self.excludes = set()
+
+    @memoized_property
     def name(self):
       return '{}'.format(os.path.relpath(self.directory, get_buildroot()).replace(os.sep, '-'))
-    @property
+
+    @memoized_property
     def filename(self):
       return '{}.iml'.format(self.name)
+
+  def __init__(self, blob, output_directory, workdir, maven_style=True, exclude_folders=None,
+               annotation_processing=None):
+    self.blob = blob
+    self.maven_style = maven_style
+    self.global_excludes = exclude_folders or ()
+    self.workdir = workdir
+    self.output_directory = output_directory or os.path.abspath('.')
+    self.annotation_processing = annotation_processing
+    self.modules = [self.Module(module_dir, self.targets_by_source_root[module_dir])
+                    for module_dir in sorted(self.targets_by_source_root)]
+    self._compute_module_dependencies()
+
+  @memoized_method
+  def _maven_excludes(self, path):
+    excludes = set()
+    if path and os.path.exists(path):
+      if os.path.isdir(path):
+        target = os.path.join(path, 'target')
+        if os.path.exists(os.path.join(path, 'pom.xml')) and os.path.exists(target):
+          excludes.add(target)
+      parent = os.path.dirname(path)
+      if parent != path:
+        excludes.extend(self._maven_excludes(parent))
+    return excludes
+
+  def _compute_module_dependencies(self):
+    def collect_libraries(module, target_spec):
+      if self.blob['targets'][target_spec].get('pants_target_type') != 'jar_library':
+        return False
+      for library_name in self.blob['targets'][target_spec]['libraries']:
+        for conf, path in self.blob['libraries'][library_name].items():
+          module.libraries[conf].add(path)
+      return True
+
+    for module, target in self.modules_and_targets:
+      for target_dependency in target['targets']:
+        if collect_libraries(module, target_dependency):
+          continue
+        if target_dependency not in self.module_names_by_target:
+          continue
+        dependency = self.module_names_by_target[target_dependency]
+        if dependency != module.name:
+          module.dependencies.add(dependency)
+
+  @memoized_property
+  def module_names_by_target(self):
+    module_names_by_target = {}
+    for module in self.modules:
+      for target in module.targets:
+        module_names_by_target[target['spec']] = module.name
+    return module_names_by_target
+
+  @memoized_property
+  def module_names(self):
+    return { module.name for module in self.modules }
+
+  @property
+  def modules_and_targets(self):
+    for module in self.modules:
+      for target in module.targets:
+        yield module, target
+
+  @property
+  def targets_by_source_root(self):
+    targets_by_module = defaultdict(list)
+    for target_spec, target_data in self.blob['targets'].items():
+      if not target_data.get('roots'):
+        continue
+      target_data['spec'] = target_spec
+      root_dir = os.sep.join(self._common_prefix(root['source_root'].split(os.sep)
+                                                 for root in target_data['roots']))
+      if self.maven_style:
+        parts = root_dir.split(os.sep)
+        if 'src' in parts:
+          root_dir = os.sep.join(parts[:parts.index('src')])
+      targets_by_module[root_dir].append(target_data)
+    return targets_by_module
+
+  @property
+  def annotation_processing_template(self):
+    return TemplateData(
+      enabled=self.annotation_processing.enabled,
+      rel_source_output_dir=os.path.join('..','..','..',
+                                         self.annotation_processing.sources_dir),
+      source_output_dir=
+      os.path.join(self.workdir,
+                   self.annotation_processing.sources_dir),
+      rel_test_source_output_dir=os.path.join('..','..','..',
+                                              self.annotation_processing.test_sources_dir),
+      test_source_output_dir=
+      os.path.join(self.workdir,
+                   self.annotation_processing.test_sources_dir),
+      processors=[{'class_name' : processor}
+                  for processor in self.annotation_processing.processors],
+      classpath=[lib['default'] for lib in self.blob['libraries'].values() if lib.get('default')],
+    )
+
+  @memoized_property
+  def project_template(self):
+    target_levels = {Revision.lenient(platform['target_level'])
+                     for platform in self.blob['jvm_platforms']['platforms'].values()}
+    lang_level = max(target_levels)
+
+    configured_project = TemplateData(
+      root_dir=get_buildroot(),
+      outdir=self.output_directory,
+      git_root=Git.detect_worktree(),
+      modules=self.module_templates_by_filename.values(),
+      java=TemplateData(
+        encoding=self.java_encoding,
+        maximum_heap_size=self.java_maximum_heap_size,
+        jdk='{0}.{1}'.format(*lang_level.components[:2]),
+        language_level='JDK_{0}_{1}'.format(*lang_level.components[:2]),
+      ),
+      resource_extensions=[],
+      scala=None,
+      checkstyle_classpath=';'.join([]),
+      debug_port=None,
+      annotation_processing=self.annotation_processing_template,
+      extra_components=[],
+    )
+    return configured_project
+
+  @memoized_property
+  def module_templates_by_filename(self):
+    return dict(self._generate_module_templates())
+
+  def _generate_module_templates(self):
+    for module in self.modules:
+      module_dir, targets = module
+      sources_by_root = {}
+      for target_data in targets:
+        for root in target_data['roots']:
+          source_root = root['source_root']
+          package_prefix = root['package_prefix']
+          if not source_root.startswith(module.directory):
+            continue
+          module.excludes.add(os.path.relpath(self._maven_excludes(source_root)))
+          if self.maven_style:
+            # Truncate source root, so that targets are listed under src/test/** rather than
+            # src/test/com/foobar/package1/*, src/test/com/foobar/package2/* individually.
+            package_path_suffix = '{}{}'.format(os.sep, package_prefix.replace('.', os.sep))
+            if source_root.endswith(package_path_suffix) and \
+                            len(module.directory) < len(source_root) - len(package_path_suffix):
+              source_root = source_root[:-len(package_path_suffix)]
+              package_prefix = None
+            # Infer test target type by the presence of src/test in the path.
+            if target_data['target_type'] == 'RESOURCE':
+              target_data['target_type'] = 'TEST_RESOURCE'
+            elif target_data['target_type'] == 'SOURCE':
+              target_data['target_type'] = 'TEST'
+          if source_root in sources_by_root:
+            # If a target already claimed this source root, pick a single winner based on type.
+            previous = _TARGET_TYPE_HIERARCHY.get(sources_by_root[source_root].raw_target_type, -1)
+            current = _TARGET_TYPE_HIERARCHY.get(target_data['target_type'], -1)
+            if previous < current:
+              continue
+          sources_by_root[source_root] = (TemplateData(
+            path=source_root,
+            package_prefix=package_prefix,
+            is_test='true' if target_data['target_type'] == 'TEST' else 'false',
+            content_type=self._content_type(target_data),
+            raw_target_type=target_data['target_type'],
+          ))
+      sources = sources_by_root.values()
+
+      content_root = TemplateData(
+        sources=sources,
+        exclude_paths=target_data.get('excludes', ()),
+      )
+
+      module_group = None
+      if module.name.startswith('.pants.d'): # TODO: get the actual name of the workdir.
+        module_group = 'temporary-pants-cache'
+      elif '-' in module.name:
+        root_module = module.name[:module.name.find('-')]
+        if root_module != module.name and root_module not in self.module_names:
+          module_group = root_module
+
+      dependencies = module.dependencies
+      dependencies.add('annotation-processing-code')
+
+      yield module.filename, TemplateData(
+        root_dir=module_dir,
+        path='$PROJECT_DIR$/{}'.format(module.filename),
+        content_roots=[content_root],
+        bash=self.bash,
+        python='python_interpreter' in target_data,
+        scala=False, # ???
+        internal_jars=[], # ???
+        internal_source_jars=[], # ???
+        external_libraries=TemplateData(**{conf: list(jars) for conf, jars in module.libraries.items()}),
+        extra_components=[],
+        exclude_folders=module.excludes | self.global_excludes,
+        java_language_level=self._java_language_level(target_data),
+        module_dependencies=sorted(dependencies),
+        group=module_group,
+      )
+
+    yield 'annotation-processing-code.iml', TemplateData(
+      root_dir=self.gen_project_workdir,
+      path='$PROJECT_DIR$/annotation-processing-code.iml',
+      content_roots=[],
+      python=False,
+      scala=False,
+      java_language_level='JDK_1_7',
+      group='temporary-pants-cache',
+      annotation_processing=self.annotation_processing_template,
+      exclude_folders=self.global_excludes,
+      module_dependencies=[],
+    )
+
+  def _content_type(self, target_data):
+    language = 'java'
+    if 'python_interpreter' in target_data:
+      language = 'python'
+    target_type = target_data['target_type']
+    if target_type == 'TEST':
+      return None
+    # TODO(gm): scala? js? go?
+    return '{language}-{type_}'.format(language=language, type_=target_type.lower())
+
+  def _java_language_level(self, target_data):
+    if 'platform' not in target_data:
+      return None
+    target_platform = target_data['platform']
+    platforms = self.blob['jvm_platforms']['platforms']
+    target_source_level = platforms[target_platform]['source_level']
+    return 'JDK_{0}_{1}'.format(*target_source_level.split('.'))
+
+  def _common_prefix(self, strings):
+    prefix = None
+    for string in strings:
+      if prefix is None:
+        prefix = string
+        continue
+      if string[:len(prefix)] != prefix: # Avoiding startswith to work with lists also.
+        for i in range(min(len(prefix), len(string))):
+          if prefix[i] != string[i]:
+            prefix = prefix[:i]
+            break
+    return prefix
+
+
+class IdeaGen(ExportTask):
 
   @classmethod
   def register_options(cls, register):
@@ -81,7 +346,7 @@ class IdeaGen(ExportTask):
              help="Exclude 'target' directories for directories containing "
                   "pom.xml files.  These directories contain generated code and"
                   "copies of files staged for deployment.")
-    register('--maven-style', action='store_true', default=False,
+    register('--maven-style', action='store_true', default=True,
              help="Optimize for a maven-style repo layout.")
     register('--exclude-folders', action='append',
              default=[
@@ -160,36 +425,27 @@ class IdeaGen(ExportTask):
   def execute(self):
     targets = self.context.targets()
     blob = self.generate_targets_map(targets)
-    configured_modules = dict(self._project_modules(blob))
 
     outdir = os.path.abspath(self.intellij_output_dir)
     if not os.path.exists(outdir):
       os.makedirs(outdir)
 
-    lang_level = None
-    for target in targets:
-      if isinstance(target, JvmTarget):
-        if lang_level is None or target.platform.target_level > lang_level:
-          lang_level = target.platform.target_level
-
-    configured_project = TemplateData(
-      root_dir=get_buildroot(),
-      outdir=outdir,
-      git_root=Git.detect_worktree(),
-      modules=configured_modules.values(),
-      java=TemplateData(
-        encoding=self.java_encoding,
-        maximum_heap_size=self.java_maximum_heap_size,
-        jdk='{0}.{1}'.format(*lang_level.components[:2]),
-        language_level='JDK_{0}_{1}'.format(*lang_level.components[:2]),
-      ),
-      resource_extensions=[],
-      scala=None,
-      checkstyle_classpath=';'.join([]),
-      debug_port=None,
-      annotation_processing=self.annotation_processing_template(blob),
-      extra_components=[],
+    annotation_processing = IdeaProject.AnnotationProcessing(
+      enabled=self.get_options().annotation_processing_enabled,
+      sources_dir=self.get_options().annotation_generated_sources_dir,
+      test_sources_dir=self.get_options().annotation_generated_test_sources_dir,
+      processors=self.get_options().annotation_processor,
     )
+
+    project = IdeaProject(blob,
+                             maven_style=self.get_options().maven_style,
+                             exclude_folders=self.get_options().exclude_folders,
+                             output_directory=outdir,
+                             workdir=self.gen_project_workdir,
+                             annotation_processing=annotation_processing)
+
+    configured_modules = project.module_templates_by_filename
+    configured_project = project.project_template
 
     existing_project_components = None
     if not self.nomerge:
@@ -228,227 +484,6 @@ class IdeaGen(ExportTask):
       shutil.move(iml, os.path.join(dirname, name))
     if self.open:
       binary_util.ui_open(self.project_filename)
-
-  def _content_type(self, target_data):
-    language = 'java'
-    if 'python_interpreter' in target_data:
-      language = 'python'
-    target_type = target_data['target_type']
-    if target_type == 'TEST':
-      return None
-    # TODO(gm): scala? js? go?
-    return '{language}-{type_}'.format(language=language, type_=target_type.lower())
-
-  def _java_language_level(self, blob, target_data):
-    if 'platform' not in target_data:
-      return None
-    target_platform = target_data['platform']
-    platforms = blob['jvm_platforms']['platforms']
-    target_source_level = platforms[target_platform]['source_level']
-    return 'JDK_{0}_{1}'.format(*target_source_level.split('.'))
-
-  def _common_prefix(self, strings):
-    prefix = None
-    for string in strings:
-      if prefix is None:
-        prefix = string
-        continue
-      if string[:len(prefix)] != prefix: # Avoiding startswith to work with lists also.
-        for i in range(min(len(prefix), len(string))):
-          if prefix[i] != string[i]:
-            prefix = prefix[:i]
-            break
-    return prefix
-
-  def _targets_by_module(self, blob):
-    targets_by_module = defaultdict(list)
-    for target_spec, target_data in blob['targets'].items():
-      if not target_data.get('roots'):
-        continue
-      target_data['spec'] = target_spec
-      root_dir = os.sep.join(self._common_prefix(root['source_root'].split(os.sep)
-                                                 for root in target_data['roots']))
-      if self.maven_style:
-        parts = root_dir.split(os.sep)
-        if 'src' in parts:
-          root_dir = os.sep.join(parts[:parts.index('src')])
-      targets_by_module[root_dir].append(target_data)
-    return targets_by_module
-
-  def _choose_target(self, one, two):
-    if one is None: return two
-    if two is None: return one
-    type_precedence = {type_: i for i, type_ in enumerate(('TEST', 'RESOURCE', 'SOURCE'))}
-    type_one = type_precedence.get(one['target_type'], -1)
-    type_two = type_precedence.get(two['target_type'], -1)
-    return two if type_two < type_one else one
-
-  def _dedup_targets(self, all_targets):
-    if len(all_targets) < 2:
-      return all_targets # Nothing to do.
-    targets_by_source_root = defaultdict(list)
-    for spec, target in all_targets.items():
-      roots = [root['source_root'] for root in target['roots']]
-      for root in roots:
-        targets_by_source_root[root].append(target)
-    for root, targets in targets_by_source_root.items():
-      if len(targets) < 2:
-        continue
-      best = None
-      for target in targets: # Pick the best target.
-        best = self._choose_target(best, target)
-      for target in targets: # Remove the root from the inferior targets.
-        if target != best:
-          target['roots'] = [r for r in target['roots'] if r['source_root'] != root]
-    return {spec: target for spec, target in all_targets.items() if target['roots']}
-
-  def _project_modules(self, blob):
-    # blob['targets'] = self._dedup_targets(blob['targets'])
-
-    targets_by_source_root = self._targets_by_module(blob)
-
-    modules = [self.Module(module_dir, targets_by_source_root[module_dir])
-               for module_dir in sorted(targets_by_source_root)]
-    module_names = { module.name for module in modules }
-
-    module_names_by_target = {}
-    for module in modules:
-      for target in module.targets:
-        module_names_by_target[target['spec']] = module.name
-
-    global_excludes = self.get_options().exclude_folders
-
-    # Map of name -> maps of confs to lists of jar paths.
-    module_external_libraries = defaultdict(lambda: defaultdict(set))
-
-    # Map of module name -> list of names of other modules.
-    module_dependencies = defaultdict(set)
-
-    # TODO: clean up this deeply nested structure.
-    # This builds up the set of libraries each module uses, and the set of other modules each module
-    # depends on.
-    for module in modules:
-      for target in module.targets:
-        for target_dependency in target['targets']:
-          if blob['targets'][target_dependency].get('pants_target_type') == 'jar_library':
-            for library_name in blob['targets'][target_dependency]['libraries']:
-              for conf, path in blob['libraries'][library_name].items():
-                module_external_libraries[module.name][conf].add(path)
-            continue
-          if target_dependency not in module_names_by_target:
-            continue
-          dependency = module_names_by_target[target_dependency]
-          if dependency != module.name:
-            module_dependencies[module.name].add(dependency)
-
-    target_type_hierarchy = {
-      type_: index for index, type_ in enumerate(('TEST_RESOURCE', 'TEST', 'RESOURCE', 'SOURCE'))
-    }
-
-    for module in modules:
-      module_dir, targets = module
-      sources_by_root = {}
-      for target_data in targets:
-        for root in target_data['roots']:
-          source_root = root['source_root']
-          package_prefix = root['package_prefix']
-          if not source_root.startswith(module.directory):
-            continue
-          if self.maven_style:
-            # Truncate source root, so that targets are listed under src/test/** rather than
-            # src/test/com/foobar/package1/*, src/test/com/foobar/package2/* individually.
-            package_path_suffix = '{}{}'.format(os.sep, package_prefix.replace('.', os.sep))
-            if source_root.endswith(package_path_suffix) and \
-                    len(module.directory) < len(source_root) - len(package_path_suffix):
-              source_root = source_root[:-len(package_path_suffix)]
-              package_prefix = None
-            # Infer test target type by the presence of src/test in the path.
-            if target_data['target_type'] == 'RESOURCE':
-              target_data['target_type'] = 'TEST_RESOURCE'
-            elif target_data['target_type'] == 'SOURCE':
-              target_data['target_type'] = 'TEST'
-          if source_root in sources_by_root:
-            # If a target already claimed this source root, pick a single winner based on type.
-            previous = target_type_hierarchy.get(sources_by_root[source_root].raw_target_type, -1)
-            current = target_type_hierarchy.get(target_data['target_type'], -1)
-            if previous < current:
-              continue
-          sources_by_root[source_root] = (TemplateData(
-            path=source_root,
-            package_prefix=package_prefix,
-            is_test='true' if target_data['target_type'] == 'TEST' else 'false',
-            content_type=self._content_type(target_data),
-            raw_target_type=target_data['target_type'],
-          ))
-      sources = sources_by_root.values()
-
-      content_root = TemplateData(
-        sources=sources,
-        exclude_paths=target_data.get('excludes', ()),
-      )
-
-      module_group = None
-      if module.name.startswith('.pants.d'): # TODO: get the actual name of the workdir.
-        module_group = 'temporary-pants-cache'
-      elif '-' in module.name:
-        root_module = module.name[:module.name.find('-')]
-        if root_module != module.name and root_module not in module_names:
-          module_group = root_module
-
-      dependencies = set(module_dependencies[module.name])
-      dependencies.add('annotation-processing-code')
-
-      yield module.filename, TemplateData(
-        root_dir=module_dir,
-        path='$PROJECT_DIR$/{}'.format(module.filename),
-        content_roots=[content_root],
-        bash=self.bash,
-        python='python_interpreter' in target_data,
-        scala=False, # ???
-        internal_jars=[], # ???
-        internal_source_jars=[], # ???
-        external_libraries=TemplateData(**{conf: list(jars) for conf, jars in module_external_libraries[module.name].items()}),
-        extra_components=[],
-        # exclude_folders=exclude_folders,
-        java_language_level=self._java_language_level(blob, target_data),
-        module_dependencies=sorted(dependencies),
-        group=module_group,
-      )
-
-    yield 'annotation-processing-code.iml', TemplateData(
-      root_dir=self.gen_project_workdir,
-      path='$PROJECT_DIR$/annotation-processing-code.iml',
-      content_roots=[],
-      python=False,
-      scala=False,
-      java_language_level='JDK_1_7',
-      group='temporary-pants-cache',
-      annotation_processing=self.annotation_processing_template(blob),
-      exclude_folders=exclude_folders,
-      module_dependencies=[],
-    )
-
-  def annotation_processing_template(self, export_blob=None):
-    classpath = None
-    if export_blob:
-      classpath = [lib['default'] for lib in export_blob['libraries'].values() if lib.get('default')]
-
-    return TemplateData(
-      enabled=self.get_options().annotation_processing_enabled,
-      rel_source_output_dir=os.path.join('..','..','..',
-                                         self.get_options().annotation_generated_sources_dir),
-      source_output_dir=
-      os.path.join(self.gen_project_workdir,
-                   self.get_options().annotation_generated_sources_dir),
-      rel_test_source_output_dir=os.path.join('..','..','..',
-                                              self.get_options().annotation_generated_test_sources_dir),
-      test_source_output_dir=
-      os.path.join(self.gen_project_workdir,
-                   self.get_options().annotation_generated_test_sources_dir),
-      processors=[{'class_name' : processor}
-                  for processor in self.get_options().annotation_processor],
-      classpath=classpath,
-    )
 
   def _generate_to_tempfile(self, generator):
     """Applies the specified generator to a temp file and returns the path to that file.
