@@ -83,14 +83,16 @@ class IdeaGen(ExportTask):
                   "copies of files staged for deployment.")
     register('--maven-style', action='store_true', default=False,
              help="Optimize for a maven-style repo layout.")
-    register('--exclude_folders', action='append',
+    register('--exclude-folders', action='append',
              default=[
                '.pants.d/compile',
                '.pants.d/ivy',
                '.pants.d/python',
                '.pants.d/resources',
-               ],
+             ],
              help='Adds folders to be excluded from the project configuration.')
+    register('--exclude-patterns', action='append', default=[],
+             help='Adds patterns for paths to be excluded from the project configuration.')
     register('--annotation-processing-enabled', action='store_true',
              help='Tell IntelliJ IDEA to run annotation processors.')
     register('--annotation-generated-sources-dir', default='generated', advanced=True,
@@ -314,15 +316,14 @@ class IdeaGen(ExportTask):
       for target in module.targets:
         module_names_by_target[target['spec']] = module.name
 
-    exclude_folders = []
-    if self.get_options().exclude_maven_target:
-      exclude_folders += IdeaGen._maven_targets_excludes(get_buildroot())
-    exclude_folders += self.get_options().exclude_folders
+    global_excludes = self.get_options().exclude_folders
 
     # Map of name -> maps of confs to lists of jar paths.
     module_external_libraries = defaultdict(lambda: defaultdict(set))
-    # Map of name -> list of names.
+
+    # Map of module name -> list of names of other modules.
     module_dependencies = defaultdict(set)
+
     # TODO: clean up this deeply nested structure.
     # This builds up the set of libraries each module uses, and the set of other modules each module
     # depends on.
@@ -339,15 +340,6 @@ class IdeaGen(ExportTask):
           dependency = module_names_by_target[target_dependency]
           if dependency != module.name:
             module_dependencies[module.name].add(dependency)
-
-    # # NB(gmalmquist): HACK! Add every library to every module.
-    # # I don't think this actually helped, delete it once you get it working.
-    # all_libraries = defaultdict(set)
-    # for module, confs in module_external_libraries.items():
-    #   for conf in confs:
-    #     all_libraries[conf].update(confs[conf])
-    # for module in module_external_libraries:
-    #   module_external_libraries[module] = all_libraries
 
     target_type_hierarchy = {
       type_: index for index, type_ in enumerate(('TEST_RESOURCE', 'TEST', 'RESOURCE', 'SOURCE'))
@@ -435,15 +427,6 @@ class IdeaGen(ExportTask):
       exclude_folders=exclude_folders,
       module_dependencies=[],
     )
-
-
-  @staticmethod
-  def _maven_targets_excludes(repo_root):
-    excludes = []
-    for (dirpath, dirnames, filenames) in safe_walk(repo_root):
-      if "pom.xml" in filenames:
-        excludes.append(os.path.join(os.path.relpath(dirpath, start=repo_root), "target"))
-    return excludes
 
   def annotation_processing_template(self, export_blob=None):
     classpath = None
