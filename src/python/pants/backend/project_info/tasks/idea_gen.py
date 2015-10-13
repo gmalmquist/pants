@@ -417,7 +417,7 @@ class IdeaGen(ExportTask):
         internal_source_jars=[], # ???
         external_libraries=TemplateData(**{conf: list(jars) for conf, jars in module_external_libraries[module.name].items()}),
         extra_components=[],
-        exclude_folders=exclude_folders,
+        # exclude_folders=exclude_folders,
         java_language_level=self._java_language_level(blob, target_data),
         module_dependencies=sorted(dependencies),
         group=module_group,
