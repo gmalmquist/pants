@@ -365,14 +365,11 @@ class IdeaGen(ExportTask):
           if self.maven_style:
             # Truncate source root, so that targets are listed under src/test/** rather than
             # src/test/com/foobar/package1/*, src/test/com/foobar/package2/* individually.
-            print(source_root)
             package_path_suffix = '{}{}'.format(os.sep, package_prefix.replace('.', os.sep))
             if source_root.endswith(package_path_suffix) and \
                     len(module.directory) < len(source_root) - len(package_path_suffix):
               source_root = source_root[:-len(package_path_suffix)]
               package_prefix = None
-            print(source_root)
-            print()
             # Infer test target type by the presence of src/test in the path.
             if target_data['target_type'] == 'RESOURCE':
               target_data['target_type'] = 'TEST_RESOURCE'
