@@ -163,6 +163,20 @@ python_library(
 )
 
 python_library(
+  name = 'detect_unpinned_artifacts',
+  sources = ['detect_unpinned_artifacts.py'],
+  dependencies = [
+    # TODO(gmalmquist): Fixup dependencies.
+    'src/python/pants/base:exceptions',
+    'src/python/pants/java/jar:manifest',
+    'src/python/pants/option',
+    'src/python/pants/util:contextutil',
+    'src/python/pants/util:memo',
+    'src/python/pants/task',
+  ],
+)
+
+python_library(
   name = 'ivy_imports',
   sources = ['ivy_imports.py'],
   dependencies = [

@@ -37,6 +37,7 @@ from pants.backend.jvm.tasks.bootstrap_jvm_tools import BootstrapJvmTools
 from pants.backend.jvm.tasks.bundle_create import BundleCreate
 from pants.backend.jvm.tasks.check_published_deps import CheckPublishedDeps
 from pants.backend.jvm.tasks.detect_duplicates import DuplicateDetector
+from pants.backend.jvm.tasks.detect_unpinned_artifacts import DetectUnpinnedArtifacts
 from pants.backend.jvm.tasks.ivy_imports import IvyImports
 from pants.backend.jvm.tasks.ivy_resolve import IvyResolve
 from pants.backend.jvm.tasks.jar_create import JarCreate
@@ -187,3 +188,5 @@ def register_goals():
   task(name='test-jvm-prep-command', action=RunTestJvmPrepCommand).install('test', first=True)
   task(name='binary-jvm-prep-command', action=RunBinaryJvmPrepCommand).install('binary', first=True)
   task(name='compile-jvm-prep-command', action=RunCompileJvmPrepCommand).install('compile', first=True)
+
+  task(name='detect-unpinned-artifacts', action=DetectUnpinnedArtifacts).install()
