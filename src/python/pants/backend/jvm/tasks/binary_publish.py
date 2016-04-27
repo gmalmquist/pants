@@ -33,5 +33,6 @@ class BinaryPublish(JarPublish):
       )
       for basedir, jars in binary_mapping.get(target).items():
         self.context.products.get('jars').add(publishable_target, basedir, product_paths=jars)
+      self.context.products.get('java').add(target, self.workdir, [publishable_target])
 
     super(BinaryPublish, self).execute()

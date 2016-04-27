@@ -15,3 +15,7 @@ class PublishableBinary(Target):
     """A publishable binary."""
     super(PublishableBinary, self).__init__(*args, **kwargs)
     self.add_labels('exportable')
+
+  @property
+  def provides(self):
+    return True
