@@ -8,7 +8,9 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 import os
 
 from pants.backend.jvm.targets.jvm_binary import JvmBinary
+from pants.backend.jvm.targets.publishable_binary import PublishableBinary
 from pants.backend.jvm.tasks.jar_publish import JarPublish
+from pants.build_graph.address import Address
 
 
 class BinaryPublish(JarPublish):
@@ -23,7 +25,13 @@ class BinaryPublish(JarPublish):
     binary_mapping = self.context.products.get('jvm_binaries')
     for target in self.context.targets(predicate=lambda t: isinstance(t, JvmBinary)):
       # TODO: make this conditional on whether the binary should be published.
+      publishable_target = self.context.add_new_target(
+        address=Address(os.path.join(self.workdir, publishable_target.id), publishable_target.name),
+        target_type=PublishableBinary,
+        dependencies=[target],
+        derived_from=target,
+      )
       for basedir, jars in binary_mapping.get(target).items():
-        self.context.products.get('jars').add(target, basedir, product_paths=jars)
+        self.context.products.get('jars').add(publishable_target, basedir, product_paths=jars)
 
     super(BinaryPublish, self).execute()
