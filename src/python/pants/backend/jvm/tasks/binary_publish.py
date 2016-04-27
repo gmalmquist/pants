@@ -25,11 +25,19 @@ class BinaryPublish(JarPublish):
     binary_mapping = self.context.products.get('jvm_binaries')
     for target in self.context.targets(predicate=lambda t: isinstance(t, JvmBinary)):
       # TODO: make this conditional on whether the binary should be published.
+      provides_target = None
+      for dependency in target.closure(bfs=True):
+        if dependency != target and dependency.is_exported:
+          provides_target = dependency
+          break
+      if not provides_target:
+        continue
       publishable_target = self.context.add_new_target(
         address=Address(os.path.join(self.workdir, target.id), target.name),
         target_type=PublishableBinary,
         dependencies=[target],
         derived_from=target,
+        provides_target=provides_target,
       )
       for basedir, jars in binary_mapping.get(target).items():
         self.context.products.get('jars').add(publishable_target, basedir, product_paths=jars)
