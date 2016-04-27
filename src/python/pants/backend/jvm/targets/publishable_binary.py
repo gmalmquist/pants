@@ -13,5 +13,5 @@ class PublishableBinary(Target):
 
   def __init__(self, *args, **kwargs):
     """A publishable binary."""
-    super(Target, self).__init__(*args, **kwargs)
+    super(PublishableBinary, self).__init__(*args, **kwargs)
     self.add_labels('exportable')
