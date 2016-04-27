@@ -7,6 +7,7 @@ python_library(
     ':benchmark_run',
     ':binary_create',
     ':bootstrap_jvm_tools',
+    ':binary_publish',
     ':bundle_create',
     ':check_published_deps',
     ':checkstyle',
@@ -61,6 +62,14 @@ python_library(
     ':jvm_binary_task',
     'src/python/pants/base:build_environment',
     'src/python/pants/util:dirutil',
+  ],
+)
+
+python_library(
+  name = 'binary_publish',
+  sources = ['binary_publish.py'],
+  dependencies = [
+    ':jar_publish',
   ],
 )
 

@@ -33,6 +33,7 @@ from pants.backend.jvm.targets.scalac_plugin import ScalacPlugin
 from pants.backend.jvm.targets.unpacked_jars import UnpackedJars
 from pants.backend.jvm.tasks.benchmark_run import BenchmarkRun
 from pants.backend.jvm.tasks.binary_create import BinaryCreate
+from pants.backend.jvm.tasks.binary_publish import BinaryPublish
 from pants.backend.jvm.tasks.bootstrap_jvm_tools import BootstrapJvmTools
 from pants.backend.jvm.tasks.bundle_create import BundleCreate
 from pants.backend.jvm.tasks.check_published_deps import CheckPublishedDeps
@@ -182,6 +183,9 @@ def register_goals():
   task(name='check_published_deps', action=CheckPublishedDepsDeprecated).install('check_published_deps')
 
   task(name='jar', action=JarPublish).install('publish')
+
+  Goal.register('publish-binary', 'Publishes monolithic binaries.')
+  task(name='publish-binary', action=BinaryPublish).install('publish-binary')
 
   # Testing.
   task(name='junit', action=JUnitRun).install('test')
