@@ -26,7 +26,7 @@ class BinaryPublish(JarPublish):
     for target in self.context.targets(predicate=lambda t: isinstance(t, JvmBinary)):
       # TODO: make this conditional on whether the binary should be published.
       publishable_target = self.context.add_new_target(
-        address=Address(os.path.join(self.workdir, target.id), publishable_target.name),
+        address=Address(os.path.join(self.workdir, target.id), target.name),
         target_type=PublishableBinary,
         dependencies=[target],
         derived_from=target,
