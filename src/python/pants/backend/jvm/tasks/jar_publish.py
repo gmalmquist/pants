@@ -509,6 +509,81 @@ class JarPublish(ScmPublishMixin, JarTask):
                       .format(repo.get('resolver'), repo.get('help', '')))
     return jvm_options
 
+
+  def stage_artifacts(self, target, jar, version, tag, changelog, get_pushdb):
+    publications = OrderedSet()
+
+    # TODO Remove this once we fix https://github.com/pantsbuild/pants/issues/1229
+    if (not self.context.products.get('jars').has(target) and
+          not self.get_options().individual_plugins):
+      raise TaskError('Expected to find a primary artifact for {} but there was no jar for it.'
+                      .format(target.address.reference()))
+
+    # TODO Remove this guard once we fix https://github.com/pantsbuild/pants/issues/1229, there
+    # should always be a primary artifact.
+    if self.context.products.get('jars').has(target):
+      self._copy_artifact(target, jar, version, typename='jars')
+      publications.add(self.Publication(name=jar.name, classifier=None, ext='jar'))
+
+      self.create_source_jar(target, jar, version)
+      publications.add(self.Publication(name=jar.name, classifier='sources', ext='jar'))
+
+      # don't request docs unless they are available for all transitive targets
+      # TODO: doc products should be checked by an independent jar'ing task, and
+      # conditionally enabled; see https://github.com/pantsbuild/pants/issues/568
+      doc_jar = self.create_doc_jar(target, jar, version)
+      if doc_jar:
+        publications.add(self.Publication(name=jar.name, classifier='javadoc', ext='jar'))
+
+      if self.publish_changelog:
+        changelog_path = self.artifact_path(jar, version, suffix='-CHANGELOG', extension='txt')
+        with safe_open(changelog_path, 'wb') as changelog_file:
+          changelog_file.write(changelog.encode('utf-8'))
+        publications.add(self.Publication(name=jar.name, classifier='CHANGELOG', ext='txt'))
+
+    # Process any extra jars that might have been previously generated for this target, or a
+    # target that it was derived from.
+    for extra_product, extra_config in (self.get_options().publish_extras or {}).items():
+      override_name = jar.name
+      if 'override_name' in extra_config:
+        # If the supplied string has a '{target_provides_name}' in it, replace it with the
+        # current jar name. If not, the string will be taken verbatim.
+        override_name = extra_config['override_name'].format(target_provides_name=jar.name)
+
+      classifier = None
+      suffix = ''
+      if 'classifier' in extra_config:
+        classifier = extra_config['classifier']
+        suffix = "-{0}".format(classifier)
+
+      extension = extra_config.get('extension', 'jar')
+
+      extra_pub = self.Publication(name=override_name, classifier=classifier, ext=extension)
+
+      # A lot of flexibility is allowed in parameterizing the extra artifact, ensure those
+      # parameters lead to a unique publication.
+      # TODO(John Sirois): Check this much earlier.
+      if extra_pub in publications:
+        raise TaskError("publish_extra for '{0}' must override one of name, classifier or "
+                        "extension with a non-default value.".format(extra_product))
+
+      # Build a list of targets to check. This list will consist of the current target, plus the
+      # entire derived_from chain.
+      target_list = [target]
+      target = target
+      while target.derived_from != target:
+        target_list.append(target.derived_from)
+        target = target.derived_from
+      for cur_tgt in target_list:
+        if self.context.products.get(extra_product).has(cur_tgt):
+          self._copy_artifact(cur_tgt, jar, version, typename=extra_product, suffix=suffix,
+                              extension=extension, override_name=override_name)
+          publications.add(extra_pub)
+
+    pom_path = self.artifact_path(jar, version, extension='pom')
+    PomWriter(get_pushdb, tag).write(target, path=pom_path)
+    return publications
+
   def publish(self, publications, jar, entry, repo, published):
     """Run ivy to publish a jar.  ivyxml_path is the path to the ivy file; published
     is a list of jars published so far (including this one). entry is a pushdb entry."""
@@ -595,79 +670,8 @@ class JarPublish(ScmPublishMixin, JarTask):
       entry = pushdb.get_entry(tgt)
       return entry.fingerprint or '0.0.0'
 
-    def stage_artifacts(tgt, jar, version, tag, changelog):
-      publications = OrderedSet()
-
-      # TODO Remove this once we fix https://github.com/pantsbuild/pants/issues/1229
-      if (not self.context.products.get('jars').has(tgt) and
-          not self.get_options().individual_plugins):
-        raise TaskError('Expected to find a primary artifact for {} but there was no jar for it.'
-                        .format(tgt.address.reference()))
-
-      # TODO Remove this guard once we fix https://github.com/pantsbuild/pants/issues/1229, there
-      # should always be a primary artifact.
-      if self.context.products.get('jars').has(tgt):
-        self._copy_artifact(tgt, jar, version, typename='jars')
-        publications.add(self.Publication(name=jar.name, classifier=None, ext='jar'))
-
-        self.create_source_jar(tgt, jar, version)
-        publications.add(self.Publication(name=jar.name, classifier='sources', ext='jar'))
-
-        # don't request docs unless they are available for all transitive targets
-        # TODO: doc products should be checked by an independent jar'ing task, and
-        # conditionally enabled; see https://github.com/pantsbuild/pants/issues/568
-        doc_jar = self.create_doc_jar(tgt, jar, version)
-        if doc_jar:
-          publications.add(self.Publication(name=jar.name, classifier='javadoc', ext='jar'))
-
-        if self.publish_changelog:
-          changelog_path = self.artifact_path(jar, version, suffix='-CHANGELOG', extension='txt')
-          with safe_open(changelog_path, 'wb') as changelog_file:
-            changelog_file.write(changelog.encode('utf-8'))
-          publications.add(self.Publication(name=jar.name, classifier='CHANGELOG', ext='txt'))
-
-      # Process any extra jars that might have been previously generated for this target, or a
-      # target that it was derived from.
-      for extra_product, extra_config in (self.get_options().publish_extras or {}).items():
-        override_name = jar.name
-        if 'override_name' in extra_config:
-          # If the supplied string has a '{target_provides_name}' in it, replace it with the
-          # current jar name. If not, the string will be taken verbatim.
-          override_name = extra_config['override_name'].format(target_provides_name=jar.name)
-
-        classifier = None
-        suffix = ''
-        if 'classifier' in extra_config:
-          classifier = extra_config['classifier']
-          suffix = "-{0}".format(classifier)
-
-        extension = extra_config.get('extension', 'jar')
-
-        extra_pub = self.Publication(name=override_name, classifier=classifier, ext=extension)
-
-        # A lot of flexibility is allowed in parameterizing the extra artifact, ensure those
-        # parameters lead to a unique publication.
-        # TODO(John Sirois): Check this much earlier.
-        if extra_pub in publications:
-          raise TaskError("publish_extra for '{0}' must override one of name, classifier or "
-                          "extension with a non-default value.".format(extra_product))
-
-        # Build a list of targets to check. This list will consist of the current target, plus the
-        # entire derived_from chain.
-        target_list = [tgt]
-        target = tgt
-        while target.derived_from != target:
-          target_list.append(target.derived_from)
-          target = target.derived_from
-        for cur_tgt in target_list:
-          if self.context.products.get(extra_product).has(cur_tgt):
-            self._copy_artifact(cur_tgt, jar, version, typename=extra_product, suffix=suffix,
-                                extension=extension, override_name=override_name)
-            publications.add(extra_pub)
-
-      pom_path = self.artifact_path(jar, version, extension='pom')
-      PomWriter(get_pushdb, tag).write(tgt, path=pom_path)
-      return publications
+    def stage_artifacts(target, jar, version, tag_name, changelog):
+      self.stage_artifacts(target, jar, version, tag_name, changelog, get_pushdb)
 
     if self.overrides:
       print('\nPublishing with revision overrides:')
