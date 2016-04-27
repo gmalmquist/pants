@@ -509,7 +509,6 @@ class JarPublish(ScmPublishMixin, JarTask):
                       .format(repo.get('resolver'), repo.get('help', '')))
     return jvm_options
 
-
   def stage_artifacts(self, target, jar, version, tag, changelog, get_pushdb):
     publications = OrderedSet()
 

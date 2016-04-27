@@ -70,6 +70,7 @@ python_library(
   sources = ['binary_publish.py'],
   dependencies = [
     ':jar_publish',
+    'src/python/pants/backend/jvm/targets:jvm',
   ],
 )
 

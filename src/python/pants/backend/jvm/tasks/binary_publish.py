@@ -18,3 +18,12 @@ class BinaryPublish(JarPublish):
   def prepare(cls, options, round_manager):
     super(BinaryPublish, cls).prepare(options, round_manager)
     round_manager.require('jvm_binaries')
+
+  def execute(self):
+    binary_mapping = self.context.products.get('jvm_binaries')
+    for target in self.context.targets(predicate=lambda t: isinstance(t, JvmBinary)):
+      # TODO: make this conditional on whether the binary should be published.
+      for basedir, jars in binary_mapping.get(target).items():
+        self.context.products.get('jars').add(target, basedir, product_paths=jars)
+
+    super(BinaryPublish, self).execute()
